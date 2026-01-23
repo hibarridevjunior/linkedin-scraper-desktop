@@ -1,0 +1,72 @@
+{
+  "name": "marketing-system",
+  "version": "2.0.0",
+  "description": "Marketing System - Contact Scraper, Email Verification & Email Campaigns",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "install-browsers": "npx playwright install chromium",
+    "prebuild": "node prebuild.js",
+    "build:win": "npm run prebuild && electron-builder --win",
+    "build:win-quick": "electron-builder --win",
+    "build:portable": "npm run prebuild && electron-builder --win portable",
+    "verify-browser": "node verify-browser-bundled.js"
+  },
+  "author": "Hibarri Systems Dev",
+  "license": "ISC",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.0",
+    "nodemailer": "^6.9.8",
+    "playwright": "^1.57.0"
+  },
+  "devDependencies": {
+    "electron": "^28.1.0",
+    "electron-builder": "^24.9.1"
+  },
+  "build": {
+    "appId": "com.hibarri.marketingsystem",
+    "productName": "Marketing System",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "**/*",
+      "!dist/**",
+      "!playwright-browser/**",
+      "!node_modules/playwright/.local-browsers/**",
+      "!node_modules/playwright-core/.local-browsers/**"
+    ],
+    "extraResources": [
+      {
+        "from": "playwright-browser",
+        "to": "playwright-browser",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "assets",
+        "to": "assets",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Marketing System"
+    },
+    "portable": {
+      "artifactName": "MarketingSystem-Portable-${version}.exe"
+    }
+  }
+}

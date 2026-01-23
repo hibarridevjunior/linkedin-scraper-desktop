@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Marketing System - Scrapers</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="container">
+      <!-- Header -->
+      <header class="header">
+        <div class="logo">
+          <svg viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 2L2 7v10c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-10-5z" />
+          </svg>
+          <h1>Marketing System</h1>
+        </div>
+        <div class="version">v2.0.0 Desktop</div>
+      </header>
+
+      <!-- Main Content -->
+      <main class="main">
+        <!-- Input Form -->
+        <div class="card" id="inputCard">
+          <h2>Scrape Business Data</h2>
+
+          <!-- Scraper Type Selection -->
+          <div class="form-group">
+            <label>Scraper Type</label>
+            <div class="scraper-tabs">
+              <button class="tab-btn active" data-scraper="linkedin">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
+                </svg>
+                LinkedIn
+              </button>
+              <button class="tab-btn" data-scraper="googlemaps">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
+                </svg>
+                Google Maps
+              </button>
+              <button class="tab-btn" data-scraper="website">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="2" y1="12" x2="22" y2="12" />
+                  <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                </svg>
+                Website
+              </button>
+              <button class="tab-btn" data-scraper="emailscraper">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+                  <polyline points="22,6 12,13 2,6"/>
+                </svg>
+                Email Scraper
+              </button>
+            </div>
+          </div>
+
+          <!-- LinkedIn Form -->
+          <div id="linkedinForm" class="scraper-form">
+            <div class="form-group">
+              <label for="companyName">Company Name *</label>
+              <input type="text" id="companyName" placeholder="e.g., Microsoft" required />
+            </div>
+
+            <div class="form-group">
+              <label for="companyDomain">Company Domain *</label>
+              <input type="text" id="companyDomain" placeholder="e.g., microsoft.com" required />
+            </div>
+
+            <div class="form-group">
+              <label for="maxProfiles">Max Profiles</label>
+              <input type="number" id="maxProfiles" value="20" min="1" max="100" style="max-width: 150px;" />
+            </div>
+
+            <!-- Enhanced Role Filter -->
+            <div class="form-group">
+              <label>Role Filter</label>
+              <div class="role-filter-container">
+                <!-- All Employees Option -->
+                <div class="role-category">
+                  <label class="role-category-header">
+                    <input type="radio" name="roleMode" value="all" checked />
+                    <span class="role-category-title">All Employees</span>
+                    <span class="role-category-desc">No role filtering</span>
+                  </label>
+                </div>
+
+                <!-- Custom Selection Option -->
+                <div class="role-category">
+                  <label class="role-category-header">
+                    <input type="radio" name="roleMode" value="custom" />
+                    <span class="role-category-title">Custom Selection</span>
+                    <span class="role-category-desc">Choose specific roles below</span>
+                  </label>
+                </div>
+
+                <!-- Role Categories (shown when Custom is selected) -->
+                <div id="roleCategories" class="role-categories" style="display: none;">
+                  
+                  <!-- C-Suite & Executives -->
+                  <div class="role-group">
+                    <div class="role-group-header" data-category="csuite">
+                      <span class="role-group-icon">👔</span>
+                      <span class="role-group-title">C-Suite & Executives</span>
+                      <span class="role-group-count" id="csuite-count">0 selected</span>
+                      <svg class="role-group-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="6 9 12 15 18 9"/>
+                      </svg>
+                    </div>
+                    <div class="role-group-items" id="csuite-items" style="display: none;">
+                      <label class="role-item"><input type="checkbox" data-category="csuite" value="CEO" /> CEO</label>
+                      <label class="role-item"><input type="checkbox" data-category="csuite" value="CFO" /> CFO</label>
+                      <label class="role-item"><input type="checkbox" data-category="csuite" value="COO" /> COO</label>
+                      <label class="role-item"><input type="checkbox" data-category="csuite" value="CTO" /> CTO</label>
+                      <label class="role-item"><input type="checkbox" data-category="csuite" value="CMO" /> CMO</label>
+                      <label class="role-item"><input type="checkbox" data-category="csuite" value="Chief" /> Chief (other)</label>
+                      <label class="role-item"><input type="checkbox" data-category="csuite" value="Founder" /> Founder</label>
+                      <label class="role-item"><input type="checkbox" data-category="csuite" value="Co-Founder" /> Co-Founder</label>
+                      <label class="role-item"><input type="checkbox" data-category="csuite" value="President" /> President</label>
+                      <label class="role-item"><input type="checkbox" data-category="csuite" value="Owner" /> Owner</label>
+                      <div class="role-group-actions">
+                        <button type="button" class="btn-select-all" data-category="csuite">Select All</button>
+                        <button type="button" class="btn-clear-all" data-category="csuite">Clear</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Directors & VPs -->
+                  <div class="role-group">
+                    <div class="role-group-header" data-category="directors">
+                      <span class="role-group-icon">📊</span>
+                      <span class="role-group-title">Directors & VPs</span>
+                      <span class="role-group-count" id="directors-count">0 selected</span>
+                      <svg class="role-group-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="6 9 12 15 18 9"/>
+                      </svg>
+                    </div>
+                    <div class="role-group-items" id="directors-items" style="display: none;">
+                      <label class="role-item"><input type="checkbox" data-category="directors" value="Director" /> Director</label>
+                      <label class="role-item"><input type="checkbox" data-category="directors" value="Head of" /> Head of</label>
+                      <label class="role-item"><input type="checkbox" data-category="directors" value="VP" /> VP</label>
+                      <label class="role-item"><input type="checkbox" data-category="directors" value="Vice President" /> Vice President</label>
+                      <label class="role-item"><input type="checkbox" data-category="directors" value="SVP" /> SVP</label>
+                      <label class="role-item"><input type="checkbox" data-category="directors" value="EVP" /> EVP</label>
+                      <label class="role-item"><input type="checkbox" data-category="directors" value="General Manager" /> General Manager</label>
+                      <div class="role-group-actions">
+                        <button type="button" class="btn-select-all" data-category="directors">Select All</button>
+                        <button type="button" class="btn-clear-all" data-category="directors">Clear</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Managers & Team Leads -->
+                  <div class="role-group">
+                    <div class="role-group-header" data-category="managers">
+                      <span class="role-group-icon">👥</span>
+                      <span class="role-group-title">Managers & Team Leads</span>
+                      <span class="role-group-count" id="managers-count">0 selected</span>
+                      <svg class="role-group-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="6 9 12 15 18 9"/>
+                      </svg>
+                    </div>
+                    <div class="role-group-items" id="managers-items" style="display: none;">
+                      <label class="role-item"><input type="checkbox" data-category="managers" value="Manager" /> Manager</label>
+                      <label class="role-item"><input type="checkbox" data-category="managers" value="Senior Manager" /> Senior Manager</label>
+                      <label class="role-item"><input type="checkbox" data-category="managers" value="Lead" /> Lead</label>
+                      <label class="role-item"><input type="checkbox" data-category="managers" value="Team Lead" /> Team Lead</label>
+                      <label class="role-item"><input type="checkbox" data-category="managers" value="Supervisor" /> Supervisor</label>
+                      <label class="role-item"><input type="checkbox" data-category="managers" value="Coordinator" /> Coordinator</label>
+                      <div class="role-group-actions">
+                        <button type="button" class="btn-select-all" data-category="managers">Select All</button>
+                        <button type="button" class="btn-clear-all" data-category="managers">Clear</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Marketing & Communications -->
+                  <div class="role-group">
+                    <div class="role-group-header" data-category="marketing">
+                      <span class="role-group-icon">📢</span>
+                      <span class="role-group-title">Marketing & Communications</span>
+                      <span class="role-group-count" id="marketing-count">0 selected</span>
+                      <svg class="role-group-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="6 9 12 15 18 9"/>
+                      </svg>
+                    </div>
+                    <div class="role-group-items" id="marketing-items" style="display: none;">
+                      <label class="role-item"><input type="checkbox" data-category="marketing" value="Marketing" /> Marketing</label>
+                      <label class="role-item"><input type="checkbox" data-category="marketing" value="Brand" /> Brand</label>
+                      <label class="role-item"><input type="checkbox" data-category="marketing" value="Content" /> Content</label>
+                      <label class="role-item"><input type="checkbox" data-category="marketing" value="Social Media" /> Social Media</label>
+                      <label class="role-item"><input type="checkbox" data-category="marketing" value="Digital Marketing" /> Digital Marketing</label>
+                      <label class="role-item"><input type="checkbox" data-category="marketing" value="Growth" /> Growth</label>
+                      <label class="role-item"><input type="checkbox" data-category="marketing" value="Communications" /> Communications</label>
+                      <label class="role-item"><input type="checkbox" data-category="marketing" value="PR" /> PR / Public Relations</label>
+                      <label class="role-item"><input type="checkbox" data-category="marketing" value="Advertising" /> Advertising</label>
+                      <div class="role-group-actions">
+                        <button type="button" class="btn-select-all" data-category="marketing">Select All</button>
+                        <button type="button" class="btn-clear-all" data-category="marketing">Clear</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Sales & Business Development -->
+                  <div class="role-group">
+                    <div class="role-group-header" data-category="sales">
+                      <span class="role-group-icon">💼</span>
+                      <span class="role-group-title">Sales & Business Development</span>
+                      <span class="role-group-count" id="sales-count">0 selected</span>
+                      <svg class="role-group-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="6 9 12 15 18 9"/>
+                      </svg>
+                    </div>
+                    <div class="role-group-items" id="sales-items" style="display: none;">
+                      <label class="role-item"><input type="checkbox" data-category="sales" value="Sales" /> Sales</label>
+                      <label class="role-item"><input type="checkbox" data-category="sales" value="Business Development" /> Business Development</label>
+                      <label class="role-item"><input type="checkbox" data-category="sales" value="Account Executive" /> Account Executive</label>
+                      <label class="role-item"><input type="checkbox" data-category="sales" value="Account Manager" /> Account Manager</label>
+                      <label class="role-item"><input type="checkbox" data-category="sales" value="Sales Representative" /> Sales Representative</label>
+                      <label class="role-item"><input type="checkbox" data-category="sales" value="Revenue" /> Revenue</label>
+                      <label class="role-item"><input type="checkbox" data-category="sales" value="Partnerships" /> Partnerships</label>
+                      <label class="role-item"><input type="checkbox" data-category="sales" value="Client Success" /> Client Success</label>
+                      <div class="role-group-actions">
+                        <button type="button" class="btn-select-all" data-category="sales">Select All</button>
+                        <button type="button" class="btn-clear-all" data-category="sales">Clear</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Engineering & Technical -->
+                  <div class="role-group">
+                    <div class="role-group-header" data-category="engineering">
+                      <span class="role-group-icon">💻</span>
+                      <span class="role-group-title">Engineering & Technical</span>
+                      <span class="role-group-count" id="engineering-count">0 selected</span>
+                      <svg class="role-group-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="6 9 12 15 18 9"/>
+                      </svg>
+                    </div>
+                    <div class="role-group-items" id="engineering-items" style="display: none;">
+                      <label class="role-item"><input type="checkbox" data-category="engineering" value="Engineer" /> Engineer</label>
+                      <label class="role-item"><input type="checkbox" data-category="engineering" value="Software Engineer" /> Software Engineer</label>
+                      <label class="role-item"><input type="checkbox" data-category="engineering" value="Developer" /> Developer</label>
+                      <label class="role-item"><input type="checkbox" data-category="engineering" value="Architect" /> Architect</label>
+                      <label class="role-item"><input type="checkbox" data-category="engineering" value="DevOps" /> DevOps</label>
+                      <label class="role-item"><input type="checkbox" data-category="engineering" value="Data Engineer" /> Data Engineer</label>
+                      <label class="role-item"><input type="checkbox" data-category="engineering" value="Data Scientist" /> Data Scientist</label>
+                      <label class="role-item"><input type="checkbox" data-category="engineering" value="ML" /> ML / AI</label>
+                      <label class="role-item"><input type="checkbox" data-category="engineering" value="QA" /> QA / Testing</label>
+                      <label class="role-item"><input type="checkbox" data-category="engineering" value="Product" /> Product</label>
+                      <div class="role-group-actions">
+                        <button type="button" class="btn-select-all" data-category="engineering">Select All</button>
+                        <button type="button" class="btn-clear-all" data-category="engineering">Clear</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- HR & People -->
+                  <div class="role-group">
+                    <div class="role-group-header" data-category="hr">
+                      <span class="role-group-icon">🤝</span>
+                      <span class="role-group-title">HR & People</span>
+                      <span class="role-group-count" id="hr-count">0 selected</span>
+                      <svg class="role-group-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="6 9 12 15 18 9"/>
+                      </svg>
+                    </div>
+                    <div class="role-group-items" id="hr-items" style="display: none;">
+                      <label class="role-item"><input type="checkbox" data-category="hr" value="HR" /> HR</label>
+                      <label class="role-item"><input type="checkbox" data-category="hr" value="Human Resources" /> Human Resources</label>
+                      <label class="role-item"><input type="checkbox" data-category="hr" value="People" /> People Operations</label>
+                      <label class="role-item"><input type="checkbox" data-category="hr" value="Talent" /> Talent</label>
+                      <label class="role-item"><input type="checkbox" data-category="hr" value="Recruiting" /> Recruiting</label>
+                      <label class="role-item"><input type="checkbox" data-category="hr" value="Recruiter" /> Recruiter</label>
+                      <label class="role-item"><input type="checkbox" data-category="hr" value="Learning" /> Learning & Development</label>
+                      <div class="role-group-actions">
+                        <button type="button" class="btn-select-all" data-category="hr">Select All</button>
+                        <button type="button" class="btn-clear-all" data-category="hr">Clear</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Finance & Accounting -->
+                  <div class="role-group">
+                    <div class="role-group-header" data-category="finance">
+                      <span class="role-group-icon">💰</span>
+                      <span class="role-group-title">Finance & Accounting</span>
+                      <span class="role-group-count" id="finance-count">0 selected</span>
+                      <svg class="role-group-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="6 9 12 15 18 9"/>
+                      </svg>
+                    </div>
+                    <div class="role-group-items" id="finance-items" style="display: none;">
+                      <label class="role-item"><input type="checkbox" data-category="finance" value="Finance" /> Finance</label>
+                      <label class="role-item"><input type="checkbox" data-category="finance" value="Financial" /> Financial Analyst</label>
+                      <label class="role-item"><input type="checkbox" data-category="finance" value="Accounting" /> Accounting</label>
+                      <label class="role-item"><input type="checkbox" data-category="finance" value="Accountant" /> Accountant</label>
+                      <label class="role-item"><input type="checkbox" data-category="finance" value="Controller" /> Controller</label>
+                      <label class="role-item"><input type="checkbox" data-category="finance" value="Treasury" /> Treasury</label>
+                      <label class="role-item"><input type="checkbox" data-category="finance" value="Tax" /> Tax</label>
+                      <label class="role-item"><input type="checkbox" data-category="finance" value="Audit" /> Audit</label>
+                      <div class="role-group-actions">
+                        <button type="button" class="btn-select-all" data-category="finance">Select All</button>
+                        <button type="button" class="btn-clear-all" data-category="finance">Clear</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Operations & Other -->
+                  <div class="role-group">
+                    <div class="role-group-header" data-category="operations">
+                      <span class="role-group-icon">⚙️</span>
+                      <span class="role-group-title">Operations & Other</span>
+                      <span class="role-group-count" id="operations-count">0 selected</span>
+                      <svg class="role-group-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="6 9 12 15 18 9"/>
+                      </svg>
+                    </div>
+                    <div class="role-group-items" id="operations-items" style="display: none;">
+                      <label class="role-item"><input type="checkbox" data-category="operations" value="Operations" /> Operations</label>
+                      <label class="role-item"><input type="checkbox" data-category="operations" value="Supply Chain" /> Supply Chain</label>
+                      <label class="role-item"><input type="checkbox" data-category="operations" value="Logistics" /> Logistics</label>
+                      <label class="role-item"><input type="checkbox" data-category="operations" value="Procurement" /> Procurement</label>
+                      <label class="role-item"><input type="checkbox" data-category="operations" value="Legal" /> Legal</label>
+                      <label class="role-item"><input type="checkbox" data-category="operations" value="Compliance" /> Compliance</label>
+                      <label class="role-item"><input type="checkbox" data-category="operations" value="Administration" /> Administration</label>
+                      <label class="role-item"><input type="checkbox" data-category="operations" value="Office Manager" /> Office Manager</label>
+                      <div class="role-group-actions">
+                        <button type="button" class="btn-select-all" data-category="operations">Select All</button>
+                        <button type="button" class="btn-clear-all" data-category="operations">Clear</button>
+                      </div>
+                    </div>
+                  </div>
+
+                </div>
+
+                <!-- Selected Roles Summary -->
+                <div id="selectedRolesSummary" class="selected-roles-summary" style="display: none;">
+                  <strong>Selected:</strong> <span id="selectedRolesText">None</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="info-box">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M12 16v-4M12 8h.01" />
+              </svg>
+              <p>
+                <strong>First time?</strong> A browser will open. Just log in to LinkedIn once!
+              </p>
+            </div>
+          </div>
+
+          <!-- Google Maps Form -->
+          <div id="googlemapsForm" class="scraper-form" style="display: none">
+            <div class="form-group">
+              <label for="searchQuery">Search Query *</label>
+              <input type="text" id="searchQuery" placeholder="e.g., wealth management companies in Sandton" required />
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label for="maxResults">Max Results</label>
+                <input type="number" id="maxResults" value="50" min="1" max="200" />
+              </div>
+              <div class="form-group">
+                <label for="mapsIndustry">Industry Tag</label>
+                <select id="mapsIndustry">
+                  <option value="">Auto-detect</option>
+                  <option value="Finance & Banking">Finance & Banking</option>
+                  <option value="Wealth Management">Wealth Management</option>
+                  <option value="Real Estate">Real Estate</option>
+                  <option value="Technology & Software">Technology & Software</option>
+                  <option value="Healthcare & Medical">Healthcare & Medical</option>
+                  <option value="Professional Services">Professional Services</option>
+                  <option value="Manufacturing">Manufacturing</option>
+                  <option value="Retail & E-commerce">Retail & E-commerce</option>
+                  <option value="Agriculture & Farming">Agriculture & Farming</option>
+                  <option value="Food & Beverages">Food & Beverages</option>
+                  <option value="Construction">Construction</option>
+                  <option value="Transportation & Logistics">Transportation & Logistics</option>
+                  <option value="Hospitality & Tourism">Hospitality & Tourism</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label class="toggle-label">
+                <input type="checkbox" id="enableEnrichment" checked />
+                <span class="toggle-switch"></span>
+                <span class="toggle-text">
+                  <strong>Auto-enrich with website data</strong>
+                  <small>Visit each business website to extract emails & descriptions</small>
+                </span>
+              </label>
+            </div>
+
+            <div class="info-box" style="background: #e8f5e9; border-color: #4caf50">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M12 16v-4M12 8h.01" />
+              </svg>
+              <p><strong>Enhanced Scraping!</strong> Finds businesses on Google Maps, then visits each website for emails and descriptions.</p>
+            </div>
+          </div>
+
+          <!-- Website Form -->
+          <div id="websiteForm" class="scraper-form" style="display: none">
+            <div class="form-group">
+              <label for="websiteUrl">Website URLs *</label>
+              <textarea id="websiteUrl" placeholder="Enter URLs (comma, semicolon, or newline separated):&#10;&#10;example1.com&#10;example2.co.za&#10;https://example3.com" rows="5" required></textarea>
+              <small class="input-help">Supports multiple URLs - paste from spreadsheet or enter comma-separated</small>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label for="websiteIndustry">Industry Tag</label>
+                <select id="websiteIndustry">
+                  <option value="">None</option>
+                  <option value="Finance & Banking">Finance & Banking</option>
+                  <option value="Wealth Management">Wealth Management</option>
+                  <option value="Real Estate">Real Estate</option>
+                  <option value="Technology & Software">Technology & Software</option>
+                  <option value="Healthcare & Medical">Healthcare & Medical</option>
+                  <option value="Professional Services">Professional Services</option>
+                  <option value="Manufacturing">Manufacturing</option>
+                  <option value="Retail & E-commerce">Retail & E-commerce</option>
+                  <option value="Agriculture & Farming">Agriculture & Farming</option>
+                  <option value="Food & Beverages">Food & Beverages</option>
+                  <option value="Construction">Construction</option>
+                  <option value="Transportation & Logistics">Transportation & Logistics</option>
+                  <option value="Hospitality & Tourism">Hospitality & Tourism</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="websiteKeywords">Keywords Tag</label>
+                <input type="text" id="websiteKeywords" placeholder="e.g., B2B, Enterprise" />
+              </div>
+            </div>
+
+            <div class="info-box" style="background: #fff3e0; border-color: #ff9800">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M12 16v-4M12 8h.01" />
+              </svg>
+              <p><strong>Bulk Scraping!</strong> Each site's homepage, Contact, and About pages will be crawled for emails and phone numbers.</p>
+            </div>
+          </div>
+
+          <!-- Email Scraper Form -->
+          <div id="emailscraperForm" class="scraper-form" style="display: none">
+            <div class="form-group">
+              <label for="emailScraperQuery">Search Query / Company Name *</label>
+              <input type="text" id="emailScraperQuery" placeholder="e.g., Microsoft, wealth management companies in Sandton" required />
+              <small class="input-help">Enter company name, search query, or website URLs</small>
+            </div>
+
+            <div class="form-group">
+              <label>Data Sources</label>
+              <div class="source-checkboxes" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 8px;">
+                <label class="checkbox-label" style="display: flex; align-items: center; gap: 8px; padding: 12px; border: 1px solid #e0e0e0; border-radius: 8px; cursor: pointer;">
+                  <input type="checkbox" id="sourceLinkedIn" checked />
+                  <svg viewBox="0 0 24 24" fill="currentColor" style="width: 20px; height: 20px;">
+                    <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
+                  </svg>
+                  <span>LinkedIn</span>
+                </label>
+                <label class="checkbox-label" style="display: flex; align-items: center; gap: 8px; padding: 12px; border: 1px solid #e0e0e0; border-radius: 8px; cursor: pointer;">
+                  <input type="checkbox" id="sourceGoogleSearch" checked />
+                  <svg viewBox="0 0 24 24" fill="currentColor" style="width: 20px; height: 20px;">
+                    <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+                    <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                    <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+                    <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+                  </svg>
+                  <span>Google Search</span>
+                </label>
+                <label class="checkbox-label" style="display: flex; align-items: center; gap: 8px; padding: 12px; border: 1px solid #e0e0e0; border-radius: 8px; cursor: pointer;">
+                  <input type="checkbox" id="sourceGoogleMaps" checked />
+                  <svg viewBox="0 0 24 24" fill="currentColor" style="width: 20px; height: 20px;">
+                    <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
+                  </svg>
+                  <span>Google Maps</span>
+                </label>
+                <label class="checkbox-label" style="display: flex; align-items: center; gap: 8px; padding: 12px; border: 1px solid #e0e0e0; border-radius: 8px; cursor: pointer;">
+                  <input type="checkbox" id="sourceWebsites" checked />
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 20px; height: 20px;">
+                    <circle cx="12" cy="12" r="10" />
+                    <line x1="2" y1="12" x2="22" y2="12" />
+                    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                  </svg>
+                  <span>Websites</span>
+                </label>
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label for="emailScraperMaxResults">Max Results per Source</label>
+                <input type="number" id="emailScraperMaxResults" value="20" min="1" max="100" />
+              </div>
+              <div class="form-group">
+                <label for="emailScraperIndustry">Industry Tag</label>
+                <select id="emailScraperIndustry">
+                  <option value="">None</option>
+                  <option value="Finance & Banking">Finance & Banking</option>
+                  <option value="Wealth Management">Wealth Management</option>
+                  <option value="Real Estate">Real Estate</option>
+                  <option value="Technology & Software">Technology & Software</option>
+                  <option value="Healthcare & Medical">Healthcare & Medical</option>
+                  <option value="Professional Services">Professional Services</option>
+                  <option value="Manufacturing">Manufacturing</option>
+                  <option value="Retail & E-commerce">Retail & E-commerce</option>
+                  <option value="Agriculture & Farming">Agriculture & Farming</option>
+                  <option value="Food & Beverages">Food & Beverages</option>
+                  <option value="Construction">Construction</option>
+                  <option value="Transportation & Logistics">Transportation & Logistics</option>
+                  <option value="Hospitality & Tourism">Hospitality & Tourism</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label for="emailScraperKeywords">Keywords Tag</label>
+              <input type="text" id="emailScraperKeywords" placeholder="e.g., B2B, Enterprise" />
+            </div>
+
+            <div class="info-box" style="background: #e3f2fd; border-color: #2196f3">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M12 16v-4M12 8h.01" />
+              </svg>
+              <p>
+                <strong>Multi-Source Email Scraping!</strong> Searches across LinkedIn, Google Search, Google Maps, and company websites to find business email addresses. Only collects domain-based emails (excludes Gmail, Yahoo, etc.).
+              </p>
+            </div>
+          </div>
+
+          <button id="startBtn" class="btn-primary">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="5 3 19 12 5 21 5 3" />
+            </svg>
+            Start Scraping
+          </button>
+        </div>
+
+        <!-- Progress Card -->
+        <div class="card" id="progressCard" style="display: none">
+          <h2>Scraping in Progress...</h2>
+          <div class="progress-phase" id="progressPhase">
+            <span class="phase-badge">Phase 1</span>
+            <span class="phase-text">Collecting data...</span>
+          </div>
+          <div class="progress-status">
+            <div class="spinner"></div>
+            <p id="statusText">Starting...</p>
+          </div>
+          <div class="progress-stats">
+            <div class="stat">
+              <div class="stat-value" id="profilesFound">0</div>
+              <div class="stat-label">Found</div>
+            </div>
+            <div class="stat">
+              <div class="stat-value" id="profilesScraped">0</div>
+              <div class="stat-label">Scraped</div>
+            </div>
+            <div class="stat" id="emailStatBox" style="display: none;">
+              <div class="stat-value" id="emailsFound">0</div>
+              <div class="stat-label">Emails</div>
+            </div>
+          </div>
+          <p class="progress-note">Browser is running. Please don't close it...</p>
+        </div>
+
+        <!-- Complete Card -->
+        <div class="card" id="completeCard" style="display: none">
+          <div class="success-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M20 6L9 17l-5-5" />
+            </svg>
+          </div>
+          <h2>Complete!</h2>
+          <p id="completeText">Contacts added to database.</p>
+          <div class="complete-stats" id="completeStats" style="display: none;">
+            <div class="complete-stat">
+              <span class="complete-stat-value" id="statTotal">0</span>
+              <span class="complete-stat-label">Total</span>
+            </div>
+            <div class="complete-stat success">
+              <span class="complete-stat-value" id="statEmails">0</span>
+              <span class="complete-stat-label">With Emails</span>
+            </div>
+            <div class="complete-stat">
+              <span class="complete-stat-value" id="statPhones">0</span>
+              <span class="complete-stat-label">With Phones</span>
+            </div>
+          </div>
+          <div class="failed-urls-section" id="failedUrlsSection" style="display: none;">
+            <h4>⚠️ Failed to scrape:</h4>
+            <ul id="failedUrlsList"></ul>
+          </div>
+          <div id="resultsSection" style="margin: 24px 0">
+            <h3 style="font-size: 1rem; margin-bottom: 12px; color: #555">Scraped Contacts:</h3>
+            <div style="max-height: 400px; overflow-y: auto; border: 1px solid #e0e0e0; border-radius: 8px;">
+              <table id="resultsTable" style="width: 100%; border-collapse: collapse">
+                <thead style="background: #f8f9fa; position: sticky; top: 0">
+                  <tr>
+                    <th style="padding: 12px; text-align: left; font-size: 0.75rem; font-weight: 600; color: #666; border-bottom: 2px solid #e0e0e0;">Name/Company</th>
+                    <th style="padding: 12px; text-align: left; font-size: 0.75rem; font-weight: 600; color: #666; border-bottom: 2px solid #e0e0e0;">Email</th>
+                    <th style="padding: 12px; text-align: left; font-size: 0.75rem; font-weight: 600; color: #666; border-bottom: 2px solid #e0e0e0;">Phone/Job Title</th>
+                    <th style="padding: 12px; text-align: left; font-size: 0.75rem; font-weight: 600; color: #666; border-bottom: 2px solid #e0e0e0;">Location/Info</th>
+                  </tr>
+                </thead>
+                <tbody id="resultsTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+          <button id="newScrapeBtn" class="btn-primary">Start New Scrape</button>
+        </div>
+
+        <!-- Error Card -->
+        <div class="card" id="errorCard" style="display: none">
+          <div class="error-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10" />
+              <path d="M12 8v4M12 16h.01" />
+            </svg>
+          </div>
+          <h2>Error</h2>
+          <p id="errorText">Something went wrong.</p>
+          <button id="retryBtn" class="btn-secondary">Try Again</button>
+        </div>
+      </main>
+
+      <footer class="footer">
+        <p>Marketing System v2.0 by SystemsDev • Data saved to Supabase</p>
+      </footer>
+    </div>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>

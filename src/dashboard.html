@@ -1,0 +1,861 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Marketing System - Dashboard</title>
+    <link rel="stylesheet" href="dashboard-styles.css" />
+  </head>
+  <body>
+    <div class="app-container">
+      <!-- Sidebar -->
+      <aside class="sidebar">
+        <div class="sidebar-header">
+          <div class="logo">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 2L2 7v10c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-10-5z" />
+            </svg>
+            <h1>Marketing System</h1>
+          </div>
+          <div class="version">v2.0.0</div>
+        </div>
+
+        <!-- Stats Cards -->
+        <div class="stats-section">
+          <h3>Overview</h3>
+          <div class="stat-card">
+            <div class="stat-icon" style="background: #e3f2fd">
+              <svg viewBox="0 0 24 24" fill="none" stroke="#0a66c2" stroke-width="2">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                <circle cx="9" cy="7" r="4" />
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+              </svg>
+            </div>
+            <div class="stat-content">
+              <div class="stat-label">Total Contacts</div>
+              <div class="stat-value" id="totalContacts">0</div>
+            </div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon" style="background: #e8f5e9">
+              <svg viewBox="0 0 24 24" fill="none" stroke="#4caf50" stroke-width="2">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                <line x1="3" y1="9" x2="21" y2="9" />
+                <line x1="9" y1="21" x2="9" y2="9" />
+              </svg>
+            </div>
+            <div class="stat-content">
+              <div class="stat-label">Companies</div>
+              <div class="stat-value" id="totalCompanies">0</div>
+            </div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon" style="background: #fff3e0">
+              <svg viewBox="0 0 24 24" fill="none" stroke="#ff9800" stroke-width="2">
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                <circle cx="12" cy="7" r="4" />
+              </svg>
+            </div>
+            <div class="stat-content">
+              <div class="stat-label">LinkedIn</div>
+              <div class="stat-value" id="linkedinCount">0</div>
+            </div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon" style="background: #f3e5f5">
+              <svg viewBox="0 0 24 24" fill="none" stroke="#9c27b0" stroke-width="2">
+                <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
+                <circle cx="12" cy="10" r="3" />
+              </svg>
+            </div>
+            <div class="stat-content">
+              <div class="stat-label">Google Maps</div>
+              <div class="stat-value" id="mapsCount">0</div>
+            </div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon" style="background: #fce4ec">
+              <svg viewBox="0 0 24 24" fill="none" stroke="#e91e63" stroke-width="2">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="2" y1="12" x2="22" y2="12" />
+                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+              </svg>
+            </div>
+            <div class="stat-content">
+              <div class="stat-label">Websites</div>
+              <div class="stat-value" id="websiteCount">0</div>
+            </div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon" style="background: #e8f5e9">
+              <svg viewBox="0 0 24 24" fill="none" stroke="#4caf50" stroke-width="2">
+                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                <polyline points="22 4 12 14.01 9 11.01"/>
+              </svg>
+            </div>
+            <div class="stat-content">
+              <div class="stat-label">Verified</div>
+              <div class="stat-value" id="verifiedCount">0</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Navigation -->
+        <nav class="sidebar-nav">
+          <div class="nav-section">
+            <h4 class="nav-section-title">Main</h4>
+            
+            <button class="nav-btn active" data-view="people">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                <circle cx="9" cy="7" r="4" />
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+              </svg>
+              People
+              <span class="nav-count" id="navPeopleCount">0</span>
+            </button>
+
+            <button class="nav-btn" data-view="companies">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                <line x1="3" y1="9" x2="21" y2="9" />
+                <line x1="9" y1="21" x2="9" y2="9" />
+              </svg>
+              Companies
+              <span class="nav-count" id="navCompaniesCount">0</span>
+            </button>
+
+            <button class="nav-btn" data-view="campaigns">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+                <polyline points="22,6 12,13 2,6"/>
+              </svg>
+              Email Campaigns
+              <span class="nav-count" id="navCampaignsCount">0</span>
+            </button>
+          </div>
+
+          <div class="nav-section">
+            <h4 class="nav-section-title">Sources</h4>
+            
+            <button class="nav-btn" data-view="linkedin">
+              <svg viewBox="0 0 24 24" fill="currentColor">
+                <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452z"/>
+              </svg>
+              LinkedIn
+              <span class="nav-count" id="navLinkedInCount">0</span>
+            </button>
+
+            <button class="nav-btn" data-view="googlemaps">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
+                <circle cx="12" cy="10" r="3" />
+              </svg>
+              Google Maps
+              <span class="nav-count" id="navMapsCount">0</span>
+            </button>
+
+            <button class="nav-btn" data-view="websites">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="2" y1="12" x2="22" y2="12" />
+                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+              </svg>
+              Websites
+              <span class="nav-count" id="navWebsitesCount">0</span>
+            </button>
+          </div>
+
+          <div class="nav-section">
+            <h4 class="nav-section-title">Actions</h4>
+            
+            <button class="nav-btn" id="openScraperBtn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              New Scrape
+            </button>
+
+            <button class="nav-btn" id="importContactsBtn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
+              </svg>
+              Import Contacts
+            </button>
+
+            <button class="nav-btn" id="smtpSettingsBtn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="3"/>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+              </svg>
+              SMTP Settings
+              <span class="smtp-status-dot" id="smtpStatusDot"></span>
+            </button>
+          </div>
+        </nav>
+      </aside>
+
+      <!-- Main Content -->
+      <main class="main-content">
+        <!-- Header -->
+        <header class="content-header">
+          <div class="header-left">
+            <h2 id="viewTitle">People</h2>
+            <p class="subtitle" id="contactCount">Loading...</p>
+          </div>
+          <div class="header-right">
+            <button class="btn-verify" id="verifySelectedBtn" style="display: none;">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                <polyline points="22 4 12 14.01 9 11.01"/>
+              </svg>
+              Verify Emails
+            </button>
+            <button class="btn-email-selected" id="emailSelectedBtn" style="display: none;">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+                <polyline points="22,6 12,13 2,6"/>
+              </svg>
+              Email Selected
+            </button>
+            <button class="btn-filters-toggle" id="toggleFiltersBtn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/>
+                <line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/>
+                <line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/>
+                <line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/>
+                <line x1="17" y1="16" x2="23" y2="16"/>
+              </svg>
+              Filters
+              <span class="filter-badge" id="filterBadge" style="display: none;">0</span>
+            </button>
+            <button class="btn-secondary" id="refreshBtn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+              </svg>
+              Refresh
+            </button>
+            <button class="btn-primary" id="exportBtn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+              </svg>
+              Export CSV
+            </button>
+          </div>
+        </header>
+
+        <!-- Filters & Search -->
+        <div class="filters-bar" id="filtersBar">
+          <div class="search-box">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.35-4.35" />
+            </svg>
+            <input type="text" id="searchInput" placeholder="Search by name, email, company..." />
+          </div>
+
+          <select id="sourceFilter" class="filter-select">
+            <option value="">All Sources</option>
+            <option value="linkedin">LinkedIn</option>
+            <option value="google_maps">Google Maps</option>
+            <option value="website">Website</option>
+            <option value="manual">Manual Import</option>
+          </select>
+
+          <select id="verificationFilter" class="filter-select">
+            <option value="">All Status</option>
+            <option value="verified">Verified</option>
+            <option value="unverified">Unverified</option>
+          </select>
+
+          <select id="industryFilter" class="filter-select">
+            <option value="">All Industries</option>
+          </select>
+
+          <select id="locationFilter" class="filter-select">
+            <option value="">All Locations</option>
+          </select>
+
+          <select id="companyFilter" class="filter-select">
+            <option value="">All Companies</option>
+          </select>
+
+          <button class="btn-clear" id="clearFiltersBtn">Clear Filters</button>
+        </div>
+
+        <!-- Data Table -->
+        <div class="table-container" id="tableContainer">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th style="width: 40px">
+                  <input type="checkbox" id="selectAll" />
+                </th>
+                <th class="sortable" data-sort="first_name">
+                  Name
+                  <svg class="sort-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 5v14M19 12l-7 7-7-7" />
+                  </svg>
+                </th>
+                <th class="sortable" data-sort="email">
+                  Email
+                  <svg class="sort-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 5v14M19 12l-7 7-7-7" />
+                  </svg>
+                </th>
+                <th class="sortable" data-sort="company">
+                  Company
+                  <svg class="sort-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 5v14M19 12l-7 7-7-7" />
+                  </svg>
+                </th>
+                <th class="sortable" data-sort="industry">
+                  Industry
+                  <svg class="sort-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 5v14M19 12l-7 7-7-7" />
+                  </svg>
+                </th>
+                <th>Phone/Job Title</th>
+                <th class="sortable" data-sort="location">
+                  Location
+                  <svg class="sort-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 5v14M19 12l-7 7-7-7" />
+                  </svg>
+                </th>
+                <th>Source</th>
+                <th class="sortable" data-sort="email_verified">
+                  Email Status
+                  <svg class="sort-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 5v14M19 12l-7 7-7-7" />
+                  </svg>
+                </th>
+                <th style="width: 100px">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="tableBody">
+              <tr>
+                <td colspan="10" class="loading-cell">
+                  <div class="spinner"></div>
+                  <p>Loading contacts...</p>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Email Campaigns View -->
+        <div id="campaignsView" class="campaigns-view" style="display: none;">
+          <div class="campaigns-header">
+            <button class="btn-primary" id="newCampaignBtn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              New Campaign
+            </button>
+          </div>
+          
+          <div class="campaigns-grid" id="campaignsGrid">
+            <!-- Campaigns will be loaded here -->
+          </div>
+
+          <div class="campaigns-empty" id="campaignsEmpty" style="display: none;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+              <polyline points="22,6 12,13 2,6"/>
+            </svg>
+            <h3>No email campaigns yet</h3>
+            <p>Create your first email campaign to start reaching your contacts!</p>
+            <button class="btn-primary" id="newCampaignBtn2">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              Create Campaign
+            </button>
+          </div>
+        </div>
+
+        <!-- Bulk Actions Bar -->
+        <div id="bulkActionsBar" class="bulk-actions-bar" style="display: none">
+          <span id="selectedCount">0 selected</span>
+          <button class="btn-email" id="emailSelectedBtn2">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+              <polyline points="22,6 12,13 2,6"/>
+            </svg>
+            Email Selected
+          </button>
+          <button class="btn-verify" id="verifySelectedBtn2">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+              <polyline points="22 4 12 14.01 9 11.01"/>
+            </svg>
+            Verify Selected
+          </button>
+          <button class="btn-danger" id="deleteSelectedBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+            </svg>
+            Delete Selected
+          </button>
+        </div>
+
+        <!-- Empty State -->
+        <div id="emptyState" class="empty-state" style="display: none">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+            <circle cx="9" cy="7" r="4" />
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+            <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+          </svg>
+          <h3>No contacts yet</h3>
+          <p>Start scraping or import contacts to see them here!</p>
+          <button class="btn-primary" id="openScraperBtn2">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+            Open Scraper
+          </button>
+        </div>
+      </main>
+
+      <!-- Advanced Filters Panel -->
+      <aside id="filtersPanel" class="filters-panel">
+        <div class="filters-panel-header">
+          <h3>Advanced Filters</h3>
+          <button class="btn-close-panel" id="closeFiltersBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        <div class="filter-section">
+          <div class="filter-section-title">
+            <h4>Management Level</h4>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="6 9 12 15 18 9"/>
+            </svg>
+          </div>
+          <div class="filter-section-content">
+            <div class="filter-checkbox-group" id="managementLevelFilters"></div>
+          </div>
+        </div>
+        <div class="filter-section">
+          <div class="filter-section-title">
+            <h4>Industry</h4>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="6 9 12 15 18 9"/>
+            </svg>
+          </div>
+          <div class="filter-section-content">
+            <div class="filter-checkbox-group" id="industryCheckboxFilters"></div>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <!-- Import Contacts Modal -->
+    <div id="importModal" class="modal" style="display: none;">
+      <div class="modal-content modal-large">
+        <div class="modal-header">
+          <h3>Import Contacts</h3>
+          <button class="btn-close-modal" id="closeImportModal">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        
+        <div class="import-tabs">
+          <button class="import-tab active" data-tab="csv">Import CSV</button>
+          <button class="import-tab" data-tab="manual">Add Manually</button>
+        </div>
+
+        <!-- CSV Import Tab -->
+        <div id="csvTab" class="import-tab-content active">
+          <div class="import-info">
+            <p>Upload a CSV file with contacts. Required columns: <strong>email</strong></p>
+            <p>Optional columns: first_name, last_name, company, job_title, phone_number, location, industry</p>
+          </div>
+          <div class="file-upload-area" id="dropZone">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            <p>Drag & drop CSV file here or <label for="csvFileInput" class="file-link">browse</label></p>
+            <input type="file" id="csvFileInput" accept=".csv" style="display: none;">
+          </div>
+          <div id="csvPreview" class="csv-preview" style="display: none;">
+            <h4>Preview (<span id="previewCount">0</span> contacts)</h4>
+            <div class="preview-table-wrapper">
+              <table class="preview-table">
+                <thead id="previewHead"></thead>
+                <tbody id="previewBody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="import-actions">
+            <button class="btn-secondary" id="cancelImportBtn">Cancel</button>
+            <button class="btn-primary" id="importCsvBtn" disabled>Import Contacts</button>
+          </div>
+        </div>
+
+        <!-- Manual Add Tab -->
+        <div id="manualTab" class="import-tab-content" style="display: none;">
+          <form id="manualContactForm">
+            <div class="form-row">
+              <div class="form-group">
+                <label for="manualFirstName">First Name</label>
+                <input type="text" id="manualFirstName" placeholder="John">
+              </div>
+              <div class="form-group">
+                <label for="manualLastName">Last Name</label>
+                <input type="text" id="manualLastName" placeholder="Doe">
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="manualEmail">Email *</label>
+              <input type="email" id="manualEmail" placeholder="john@company.com" required>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label for="manualCompany">Company</label>
+                <input type="text" id="manualCompany" placeholder="Company Name">
+              </div>
+              <div class="form-group">
+                <label for="manualJobTitle">Job Title</label>
+                <input type="text" id="manualJobTitle" placeholder="CEO">
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label for="manualPhone">Phone</label>
+                <input type="tel" id="manualPhone" placeholder="+27 12 345 6789">
+              </div>
+              <div class="form-group">
+                <label for="manualLocation">Location</label>
+                <input type="text" id="manualLocation" placeholder="Johannesburg, South Africa">
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="manualIndustry">Industry</label>
+              <select id="manualIndustry">
+                <option value="">Select Industry</option>
+                <option value="Technology & Software">Technology & Software</option>
+                <option value="Food & Beverages">Food & Beverages</option>
+                <option value="Agriculture & Farming">Agriculture & Farming</option>
+                <option value="Healthcare & Medical">Healthcare & Medical</option>
+                <option value="Finance & Banking">Finance & Banking</option>
+                <option value="Manufacturing">Manufacturing</option>
+                <option value="Retail & E-commerce">Retail & E-commerce</option>
+                <option value="Real Estate">Real Estate</option>
+                <option value="Education">Education</option>
+                <option value="Professional Services">Professional Services</option>
+                <option value="Transportation & Logistics">Transportation & Logistics</option>
+                <option value="Construction">Construction</option>
+                <option value="Media & Entertainment">Media & Entertainment</option>
+                <option value="Hospitality & Tourism">Hospitality & Tourism</option>
+              </select>
+            </div>
+            <div class="import-actions">
+              <button type="button" class="btn-secondary" id="cancelManualBtn">Cancel</button>
+              <button type="submit" class="btn-primary">Add Contact</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <!-- API Key Modal -->
+    <div id="apiKeyModal" class="modal" style="display: none;">
+      <div class="modal-content">
+        <h3>Email Verification API Key</h3>
+        <p>Enter your Abstract API key for email verification.</p>
+        <p style="font-size: 12px; color: #666;">Get a free key at: <a href="https://www.abstractapi.com/api/email-verification-validation-api" target="_blank">abstractapi.com</a></p>
+        <input type="text" id="apiKeyInput" placeholder="Enter API key...">
+        <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px;">
+          <button id="cancelApiBtn" class="btn-secondary">Cancel</button>
+          <button id="saveApiBtn" class="btn-primary">Save & Verify</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- SMTP Settings Modal -->
+    <div id="smtpModal" class="modal" style="display: none;">
+      <div class="modal-content modal-medium">
+        <div class="modal-header">
+          <h3>SMTP Settings</h3>
+          <button class="btn-close-modal" id="closeSmtpModal">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        
+        <div class="smtp-status-banner" id="smtpStatusBanner">
+          <span class="status-indicator disconnected"></span>
+          <span>Not Connected</span>
+        </div>
+
+        <form id="smtpForm">
+          <div class="form-group">
+            <label for="smtpHost">SMTP Host *</label>
+            <input type="text" id="smtpHost" placeholder="smtp.gmail.com" required>
+            <small>e.g., smtp.gmail.com, smtp.office365.com, smtp.mailgun.org</small>
+          </div>
+          
+          <div class="form-row">
+            <div class="form-group">
+              <label for="smtpPort">Port *</label>
+              <select id="smtpPort" required>
+                <option value="587">587 (TLS - Recommended)</option>
+                <option value="465">465 (SSL)</option>
+                <option value="25">25 (Unencrypted)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="smtpSecure">Security</label>
+              <select id="smtpSecure">
+                <option value="false">STARTTLS</option>
+                <option value="true">SSL/TLS</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="smtpUser">Username / Email *</label>
+            <input type="text" id="smtpUser" placeholder="your-email@domain.com" required>
+          </div>
+
+          <div class="form-group">
+            <label for="smtpPass">Password / App Password *</label>
+            <input type="password" id="smtpPass" placeholder="••••••••" required>
+            <small>For Gmail, use an <a href="https://myaccount.google.com/apppasswords" target="_blank">App Password</a></small>
+          </div>
+
+          <div class="form-group">
+            <label for="smtpFromName">From Name</label>
+            <input type="text" id="smtpFromName" placeholder="Marketing Team">
+          </div>
+
+          <div class="smtp-presets">
+            <label>Quick Presets:</label>
+            <div class="preset-buttons">
+              <button type="button" class="btn-preset" data-preset="gmail">Gmail</button>
+              <button type="button" class="btn-preset" data-preset="outlook">Outlook</button>
+              <button type="button" class="btn-preset" data-preset="mailgun">Mailgun</button>
+              <button type="button" class="btn-preset" data-preset="sendgrid">SendGrid</button>
+            </div>
+          </div>
+
+          <div class="import-actions">
+            <button type="button" class="btn-secondary" id="disconnectSmtpBtn">Disconnect</button>
+            <button type="button" class="btn-secondary" id="testSmtpBtn">Test Connection</button>
+            <button type="submit" class="btn-primary">Connect</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Email Composer Modal -->
+    <div id="emailComposerModal" class="modal" style="display: none;">
+      <div class="modal-content modal-xlarge">
+        <div class="modal-header">
+          <h3 id="composerTitle">Compose Email</h3>
+          <button class="btn-close-modal" id="closeComposerModal">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+
+        <div class="composer-layout">
+          <!-- Left: Editor -->
+          <div class="composer-editor">
+            <div class="form-group">
+              <label for="emailSubject">Subject Line *</label>
+              <input type="text" id="emailSubject" placeholder="Hello {{first_name}}, we have an offer for you!">
+              <small>Use variables: {{first_name}}, {{last_name}}, {{company}}, {{job_title}}</small>
+            </div>
+
+            <div class="form-group">
+              <label>Email Body *</label>
+              <div class="editor-toolbar">
+                <button type="button" class="toolbar-btn" data-action="bold" title="Bold"><strong>B</strong></button>
+                <button type="button" class="toolbar-btn" data-action="italic" title="Italic"><em>I</em></button>
+                <button type="button" class="toolbar-btn" data-action="underline" title="Underline"><u>U</u></button>
+                <span class="toolbar-divider"></span>
+                <button type="button" class="toolbar-btn" data-action="link" title="Insert Link">🔗</button>
+                <button type="button" class="toolbar-btn" data-action="image" title="Insert Image">🖼️</button>
+                <span class="toolbar-divider"></span>
+                <select class="toolbar-select" id="insertVariable">
+                  <option value="">Insert Variable...</option>
+                  <option value="{{first_name}}">First Name</option>
+                  <option value="{{last_name}}">Last Name</option>
+                  <option value="{{full_name}}">Full Name</option>
+                  <option value="{{email}}">Email</option>
+                  <option value="{{company}}">Company</option>
+                  <option value="{{job_title}}">Job Title</option>
+                  <option value="{{location}}">Location</option>
+                  <option value="{{industry}}">Industry</option>
+                </select>
+              </div>
+              <div id="emailEditor" class="email-editor" contenteditable="true">
+                <p>Hi {{first_name|there}},</p>
+                <p>I hope this email finds you well.</p>
+                <p></p>
+                <p>Best regards,<br>Your Name</p>
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label for="replyToEmail">Reply-To Email</label>
+                <input type="email" id="replyToEmail" placeholder="replies@yourcompany.com">
+              </div>
+              <div class="form-group">
+                <label for="campaignName">Campaign Name</label>
+                <input type="text" id="campaignName" placeholder="Q1 Outreach Campaign">
+              </div>
+            </div>
+          </div>
+
+          <!-- Right: Preview & Recipients -->
+          <div class="composer-sidebar">
+            <div class="preview-section">
+              <h4>Live Preview</h4>
+              <div class="email-preview-box">
+                <div class="preview-header">
+                  <strong>Subject:</strong> <span id="previewSubject">Hello there, we have an offer for you!</span>
+                </div>
+                <div class="preview-body" id="previewBody">
+                  <p>Hi there,</p>
+                  <p>I hope this email finds you well.</p>
+                  <p></p>
+                  <p>Best regards,<br>Your Name</p>
+                </div>
+              </div>
+              <div class="preview-sample">
+                <label>Preview as:</label>
+                <select id="previewContact">
+                  <option value="">Sample Contact</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="recipients-section">
+              <h4>Recipients (<span id="recipientCount">0</span>)</h4>
+              <div class="recipients-list" id="recipientsList">
+                <p class="no-recipients">No recipients selected</p>
+              </div>
+            </div>
+
+            <div class="send-options">
+              <h4>Send Options</h4>
+              <div class="form-group">
+                <label for="emailDelay">Delay Between Emails</label>
+                <select id="emailDelay">
+                  <option value="1000">1 second (Fast)</option>
+                  <option value="2000" selected>2 seconds (Normal)</option>
+                  <option value="5000">5 seconds (Safe)</option>
+                  <option value="10000">10 seconds (Very Safe)</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="batchSize">Batch Size</label>
+                <select id="batchSize">
+                  <option value="25">25 emails per batch</option>
+                  <option value="50" selected>50 emails per batch</option>
+                  <option value="100">100 emails per batch</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="composer-footer">
+          <div class="send-progress" id="sendProgress" style="display: none;">
+            <div class="progress-bar">
+              <div class="progress-fill" id="sendProgressFill"></div>
+            </div>
+            <span id="sendProgressText">Sending 0/0...</span>
+          </div>
+          <div class="composer-actions">
+            <button type="button" class="btn-secondary" id="saveDraftBtn">Save as Draft</button>
+            <button type="button" class="btn-secondary" id="sendTestBtn">Send Test Email</button>
+            <button type="button" class="btn-primary btn-send" id="sendCampaignBtn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+              </svg>
+              Send Campaign
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Send Test Email Modal -->
+    <div id="testEmailModal" class="modal" style="display: none;">
+      <div class="modal-content">
+        <h3>Send Test Email</h3>
+        <p>Send a test email to verify your campaign looks correct.</p>
+        <div class="form-group">
+          <label for="testEmailAddress">Test Email Address *</label>
+          <input type="email" id="testEmailAddress" placeholder="your-email@example.com">
+        </div>
+        <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px;">
+          <button id="cancelTestEmailBtn" class="btn-secondary">Cancel</button>
+          <button id="confirmTestEmailBtn" class="btn-primary">Send Test</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Email Generator Modal (Survivability) -->
+    <div id="emailGeneratorModal" class="modal" style="display: none;">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Generate Random Emails</h3>
+          <button class="btn-close-modal" id="closeGeneratorModal">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        <p>Generate random email addresses for testing email deliverability and survivability.</p>
+        <div class="form-group">
+          <label for="generatorDomain">Domain *</label>
+          <input type="text" id="generatorDomain" placeholder="yourdomain.com">
+        </div>
+        <div class="form-group">
+          <label for="generatorPrefix">Prefix (optional)</label>
+          <input type="text" id="generatorPrefix" placeholder="test">
+          <small>Generated: prefix.randomstring@domain.com</small>
+        </div>
+        <div class="form-group">
+          <label for="generatorCount">Number of Emails</label>
+          <input type="number" id="generatorCount" value="10" min="1" max="100">
+        </div>
+        <div class="generated-emails" id="generatedEmails" style="display: none;">
+          <label>Generated Emails:</label>
+          <textarea id="generatedEmailsList" rows="6" readonly></textarea>
+          <button class="btn-secondary" id="copyGeneratedBtn">Copy to Clipboard</button>
+        </div>
+        <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px;">
+          <button id="closeGeneratorBtn" class="btn-secondary">Close</button>
+          <button id="generateEmailsBtn" class="btn-primary">Generate</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="dashboard-renderer.js"></script>
+  </body>
+</html>
