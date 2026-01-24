@@ -301,6 +301,20 @@ async function verifyEmailWithAPI(email, apiKey) {
           // Check for API errors
           if (response.error) {
             console.error('API Error:', response.error);
+            
+            // Handle quota errors specifically
+            if (response.error.code === 'quota_reached' || response.error.message?.includes('quota')) {
+              resolve({ 
+                isValid: null, // null means couldn't verify (not false/invalid)
+                status: 'quota_exceeded',
+                details: {
+                  error: 'API quota exceeded. Please upgrade your Abstract API plan or use a different API key.',
+                  code: response.error.code
+                }
+              });
+              return;
+            }
+            
             resolve({ 
               isValid: false, 
               status: 'error',
@@ -341,23 +355,37 @@ async function verifyEmailWithAPI(email, apiKey) {
           if (deliveryStatus === 'deliverable') {
             isValid = true;
             status = 'verified';
-          } else if (deliveryStatus === 'risky') {
-            isValid = false;
-            status = 'risky';
           } else if (deliveryStatus === 'undeliverable') {
             isValid = false;
             status = 'invalid';
-          } else if (deliveryStatus === 'unknown') {
-            // For unknown, use secondary checks
-            if (isFormatValid && isMxValid && addressRisk === 'low') {
-              isValid = false;
-              status = 'risky'; // Can't confirm, but domain looks OK
-            } else if (isFormatValid && isMxValid) {
-              isValid = false;
-              status = 'risky';
+          } else if (deliveryStatus === 'risky') {
+            // Risky from API - check if we can still consider it valid
+            if (isFormatValid && isMxValid && addressRisk === 'low' && !isDisposable) {
+              isValid = true; // Format and MX valid, low risk - treat as verified
+              status = 'verified';
             } else {
               isValid = false;
-              status = 'invalid';
+              status = 'risky';
+            }
+          } else if (deliveryStatus === 'unknown') {
+            // For unknown, be more lenient - if format and MX are valid, consider it verified
+            if (isFormatValid && isMxValid && !isDisposable) {
+              if (addressRisk === 'low') {
+                isValid = true;
+                status = 'verified'; // Format valid, MX valid, low risk - good enough
+              } else if (addressRisk === 'medium') {
+                isValid = true;
+                status = 'verified'; // Still accept medium risk as verified
+              } else {
+                isValid = false;
+                status = 'risky'; // High risk only
+              }
+            } else if (isFormatValid && isMxValid) {
+              isValid = false;
+              status = 'risky'; // Valid format/MX but disposable or other issues
+            } else {
+              isValid = false;
+              status = 'invalid'; // Invalid format or MX
             }
           }
           
@@ -367,9 +395,10 @@ async function verifyEmailWithAPI(email, apiKey) {
             status = 'risky';
           }
           
-          // Override: High address risk = risky
-          if (addressRisk === 'high' && status === 'verified') {
+          // Override: Only downgrade if address risk is high AND we have other concerns
+          if (addressRisk === 'high' && (isDisposable || !isMxValid)) {
             status = 'risky';
+            isValid = false;
           }
           
           console.log(`Result for ${email}: ${status} (delivery: ${deliveryStatus}, smtp: ${isSmtpValid}, addressRisk: ${addressRisk})`);
@@ -431,25 +460,41 @@ ipcMain.handle('verify-emails', async (event, emailData, apiKey) => {
         const verifyResult = await verifyEmailWithAPI(item.email, apiKey);
         
         // Update in Supabase
-        const { error } = await supabase
-          .from('contacts')
-          .update({ 
-            email_verified: verifyResult.isValid,
-            verification_status: verifyResult.status,
-            verification_details: verifyResult.details
-          })
-          .eq('id', item.id);
+        // Only update if not quota exceeded (don't overwrite existing status)
+        if (verifyResult.status !== 'quota_exceeded') {
+          const { error } = await supabase
+            .from('contacts')
+            .update({ 
+              email_verified: verifyResult.isValid,
+              verification_status: verifyResult.status,
+              verification_details: verifyResult.details
+            })
+            .eq('id', item.id);
+        } else {
+          // For quota exceeded, just log it
+          console.log(`Quota exceeded for ${item.email} - skipping database update`);
+        }
 
         if (error) {
           console.error('Supabase update error:', error);
         }
 
-        results.push({ 
-          id: item.id, 
-          verified: verifyResult.isValid, 
-          status: verifyResult.status,
-          details: verifyResult.details
-        });
+        // Handle quota exceeded specially
+        if (verifyResult.status === 'quota_exceeded') {
+          results.push({ 
+            id: item.id, 
+            verified: null, 
+            status: 'quota_exceeded',
+            details: verifyResult.details
+          });
+        } else {
+          results.push({ 
+            id: item.id, 
+            verified: verifyResult.isValid, 
+            status: verifyResult.status,
+            details: verifyResult.details
+          });
+        }
 
         // Rate limiting - wait 1.1 seconds between API calls (free tier limit)
         await new Promise(resolve => setTimeout(resolve, 1100));

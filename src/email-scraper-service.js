@@ -167,8 +167,18 @@ async function runUnifiedEmailScraper(config, progressCallback) {
       }
     } catch (error) {
       console.error('Google Search scraper error:', error);
-      errors.push({ source: 'googleSearch', error: error.message });
+      const errorMsg = error.message.includes('CAPTCHA') 
+        ? 'Google CAPTCHA detected. Please solve it manually in the browser, or try other sources (LinkedIn, Google Maps, Websites).'
+        : error.message;
+      errors.push({ source: 'googleSearch', error: errorMsg });
       sourceStats.googleSearch.errors++;
+      
+      // Continue with other sources even if Google Search fails
+      progressCallback({
+        status: `Google Search failed: ${errorMsg}. Continuing with other sources...`,
+        source: 'googleSearch',
+        phase: 'error'
+      });
     }
   }
   

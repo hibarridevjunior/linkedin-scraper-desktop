@@ -1,5 +1,42 @@
 const { launchBrowser } = require('./browser-helper');
 const { createClient } = require('@supabase/supabase-js');
+const { extractEmails, filterBusinessEmails, getBestEmail, extractCompanyFromDomain } = require('./email-extractor');
+
+/**
+ * Generate potential website domains based on business name
+ * @param {string} businessName - Name of the business
+ * @returns {Array<string>} - Array of potential domain names
+ */
+function generatePotentialDomains(businessName) {
+  if (!businessName) return [];
+  
+  const domains = [];
+  const cleanName = businessName
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '') // Remove special chars
+    .replace(/\s+/g, '') // Remove spaces
+    .trim();
+  
+  if (cleanName.length > 0) {
+    // Direct domain: businessname.com
+    domains.push(`${cleanName}.com`);
+    domains.push(`${cleanName}.co.za`); // South Africa TLD
+    domains.push(`${cleanName}.net`);
+    domains.push(`${cleanName}.org`);
+    
+    // With "car hire" or similar keywords removed
+    const withoutKeywords = cleanName
+      .replace(/carhire|carhire|rental|hire|services|group|pty|ltd|inc|llc/gi, '')
+      .trim();
+    
+    if (withoutKeywords && withoutKeywords !== cleanName) {
+      domains.push(`${withoutKeywords}.com`);
+      domains.push(`${withoutKeywords}.co.za`);
+    }
+  }
+  
+  return domains;
+}
 
 const SUPABASE_URL = 'https://cvecdppmqcxgofetrfir.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN2ZWNkcHBtcWN4Z29mZXRyZmlyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc1ODQ3NDYsImV4cCI6MjA4MzE2MDc0Nn0.GjF5fvkdeDo8kjso3RxQTVEroMO6-hideVgPAYWDyvc';
@@ -66,46 +103,13 @@ function extractPhoneNumbers(text) {
   return [...new Set(cleaned)];
 }
 
-function extractEmails(text, html = '') {
-  if (!text && !html) return [];
-  
-  const combinedText = text + ' ' + html;
-  const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
-  const matches = combinedText.match(emailRegex) || [];
-  
-  const blacklist = [
-    'example.com', 'domain.com', 'email.com', 'test.com',
-    'sentry.io', 'w3.org', 'schema.org', 'wixpress.com',
-    'google.com', 'gstatic.com', 'googleapis.com',
-    'cloudflare.com', 'wp.com', 'wordpress.com',
-    '.png', '.jpg', '.gif', '.svg', '.css', '.js',
-    'noreply', 'no-reply', 'unsubscribe', 'mailer-daemon'
-  ];
-  
-  const validEmails = matches.filter(email => {
-    const lower = email.toLowerCase();
-    if (blacklist.some(bl => lower.includes(bl))) return false;
-    if (email.length > 60 || email.length < 6) return false;
-    const domain = email.split('@')[1];
-    if (!domain || !domain.includes('.')) return false;
-    const ext = domain.split('.').pop();
-    if (ext.length < 2 || ext.length > 10) return false;
-    return true;
-  });
-  
-  const unique = [...new Set(validEmails.map(e => e.toLowerCase()))];
-  const personalDomains = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'live.com', 'icloud.com'];
-  
-  // Sort business emails first
-  unique.sort((a, b) => {
-    const aPersonal = personalDomains.some(d => a.includes(d));
-    const bPersonal = personalDomains.some(d => b.includes(d));
-    if (aPersonal && !bPersonal) return 1;
-    if (!aPersonal && bPersonal) return -1;
-    return 0;
-  });
-  
-  return unique;
+// Use centralized email extractor (already imported above)
+// This function is kept for backward compatibility but now uses the shared extractor
+function extractEmailsLocal(text, html = '') {
+  // Use the centralized email extractor which handles filtering
+  const allEmails = extractEmails(text, html);
+  // Filter to business emails only
+  return filterBusinessEmails(allEmails);
 }
 
 /**
@@ -198,7 +202,7 @@ async function enrichFromWebsite(page, websiteUrl, businessName, progressCallbac
       }
     }
 
-    // Also check for About page for better description
+    // Also check for About page for better description and emails
     const aboutLinks = await page.evaluate(() => {
       const links = Array.from(document.querySelectorAll('a'));
       const aboutUrls = [];
@@ -207,7 +211,7 @@ async function enrichFromWebsite(page, websiteUrl, businessName, progressCallbac
         const href = (link.href || '').toLowerCase();
         const text = (link.innerText || '').toLowerCase();
         
-        if (href.includes('about') || text.includes('about')) {
+        if (href.includes('about') || text.includes('about') || text.includes('about us')) {
           if (link.href && !aboutUrls.includes(link.href)) {
             aboutUrls.push(link.href);
           }
@@ -216,8 +220,30 @@ async function enrichFromWebsite(page, websiteUrl, businessName, progressCallbac
       
       return aboutUrls.slice(0, 1);
     });
+    
+    // Also check for Team/Staff page (often has contact emails)
+    const teamLinks = await page.evaluate(() => {
+      const links = Array.from(document.querySelectorAll('a'));
+      const teamUrls = [];
+      
+      links.forEach(link => {
+        const href = (link.href || '').toLowerCase();
+        const text = (link.innerText || '').toLowerCase();
+        
+        if (href.includes('team') || text.includes('team') || 
+            href.includes('staff') || text.includes('staff') ||
+            href.includes('people') || text.includes('people')) {
+          if (link.href && !teamUrls.includes(link.href)) {
+            teamUrls.push(link.href);
+          }
+        }
+      });
+      
+      return teamUrls.slice(0, 1);
+    });
 
-    if (aboutLinks.length > 0 && !enrichedData.description) {
+    // Visit About page for description and emails
+    if (aboutLinks.length > 0) {
       try {
         await page.goto(aboutLinks[0], { waitUntil: 'domcontentloaded', timeout: 15000 });
         await randomSleep(1000, 2000);
@@ -236,14 +262,34 @@ async function enrichFromWebsite(page, websiteUrl, businessName, progressCallbac
         }
         
         const aboutText = await page.evaluate(() => document.body.innerText || '');
+        const aboutHtml = await page.evaluate(() => document.body.innerHTML || '');
         allText += '\n' + aboutText;
+        allHtml += '\n' + aboutHtml;
       } catch (e) {
         // About page failed, continue
       }
     }
+    
+    // Visit Team/Staff page for more emails
+    if (teamLinks.length > 0) {
+      try {
+        await page.goto(teamLinks[0], { waitUntil: 'domcontentloaded', timeout: 15000 });
+        await randomSleep(1000, 2000);
+        
+        const teamText = await page.evaluate(() => document.body.innerText || '');
+        const teamHtml = await page.evaluate(() => document.body.innerHTML || '');
+        allText += '\n' + teamText;
+        allHtml += '\n' + teamHtml;
+      } catch (e) {
+        // Team page failed, continue
+      }
+    }
 
     // Extract emails and phones from all collected text
+    // Use centralized email extractor with business email filtering
     enrichedData.emails = extractEmails(allText, allHtml);
+    // Filter to business emails only (excludes gmail, yahoo, etc.)
+    enrichedData.emails = filterBusinessEmails(enrichedData.emails);
     enrichedData.additionalPhones = extractPhoneNumbers(allText);
 
   } catch (error) {
@@ -413,12 +459,56 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
           };
           
           const getWebsite = () => {
-            const websiteBtn = document.querySelector('[data-item-id*="authority"]');
-            if (websiteBtn) {
-              const link = websiteBtn.querySelector('a');
-              if (link) return link.href;
+            // Try multiple selectors for website button (Google Maps UI changes frequently)
+            const selectors = [
+              '[data-item-id*="authority"]',
+              '[data-item-id*="website"]',
+              'a[href^="http"][data-value="Website"]',
+              'a[aria-label*="Website"]',
+              'a[aria-label*="website"]',
+              '[jsaction*="website"] a',
+              'button[data-value="Website"] + a'
+            ];
+            
+            for (const selector of selectors) {
+              const element = document.querySelector(selector);
+              if (element) {
+                const link = element.querySelector('a') || element;
+                if (link && link.href && link.href.startsWith('http')) {
+                  return link.href;
+                }
+              }
             }
+            
+            // Also check for any external links in the business info panel
+            const allLinks = document.querySelectorAll('a[href^="http"]');
+            for (const link of allLinks) {
+              const href = link.href;
+              if (href && !href.includes('google.com') && !href.includes('maps.google.com') && 
+                  !href.includes('plus.google.com') && !href.includes('facebook.com') &&
+                  !href.includes('twitter.com') && !href.includes('instagram.com')) {
+                // Likely the business website
+                return href;
+              }
+            }
+            
             return '';
+          };
+          
+          const getEmailFromMapsPage = () => {
+            // Sometimes emails are directly visible on the Maps page
+            const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
+            const pageText = document.body.innerText || '';
+            const matches = pageText.match(emailRegex) || [];
+            
+            // Filter out common non-business emails
+            const businessEmails = matches.filter(email => {
+              const lower = email.toLowerCase();
+              const personalDomains = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'live.com', 'icloud.com'];
+              return !personalDomains.some(domain => lower.includes(domain));
+            });
+            
+            return businessEmails.length > 0 ? businessEmails[0] : '';
           };
           
           const getCategory = () => {
@@ -431,7 +521,8 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
             phone: getPhone(),
             address: getAddress(),
             website: getWebsite(),
-            category: getCategory()
+            category: getCategory(),
+            emailFromMaps: getEmailFromMapsPage() // Email found directly on Maps page
           };
         });
         
@@ -468,16 +559,54 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
         // Get enriched data from website
         let enrichedData = { emails: [], description: '', additionalPhones: [] };
         
-        if (business.website) {
-          enrichedData = await enrichFromWebsite(page, business.website, business.name, progressCallback);
+        // If email found directly on Maps page, add it
+        if (business.emailFromMaps) {
+          enrichedData.emails.push(business.emailFromMaps);
         }
+        
+        // Try to enrich from website if available
+        if (business.website) {
+          const websiteData = await enrichFromWebsite(page, business.website, business.name, progressCallback);
+          // Merge website emails with Maps page email
+          enrichedData.emails = [...enrichedData.emails, ...websiteData.emails];
+          enrichedData.description = websiteData.description || enrichedData.description;
+          enrichedData.additionalPhones = [...enrichedData.additionalPhones, ...websiteData.additionalPhones];
+        } else if (!enrichedData.emails.length) {
+          // No website listed AND no email found on Maps page
+          // Try to find website by checking common domain patterns (only if no emails found yet)
+          const potentialDomains = generatePotentialDomains(business.name);
+          
+          // Only try the most likely domain (.com)
+          if (potentialDomains.length > 0) {
+            try {
+              const testUrl = `https://${potentialDomains[0]}`;
+              // Quick check - shorter timeout
+              const response = await page.goto(testUrl, { waitUntil: 'domcontentloaded', timeout: 8000 }).catch(() => null);
+              
+              if (response && response.ok()) {
+                // Website exists! Extract emails (quick extraction only)
+                await randomSleep(1000, 1500);
+                const pageText = await page.evaluate(() => document.body.innerText || '');
+                const pageHtml = await page.evaluate(() => document.body.innerHTML || '');
+                const foundEmails = extractEmails(pageText, pageHtml);
+                const businessEmails = filterBusinessEmails(foundEmails);
+                enrichedData.emails = [...enrichedData.emails, ...businessEmails];
+              }
+            } catch (e) {
+              // Website doesn't exist or failed, continue
+            }
+          }
+        }
+        
+        // Remove duplicates and filter to business emails only
+        enrichedData.emails = filterBusinessEmails([...new Set(enrichedData.emails.map(e => e.toLowerCase()))]);
         
         // Combine Google Maps data with website data
         const phone = cleanPhoneNumber(business.phone);
         const isMobile = isMobileNumber(phone);
         
-        // Get best email (prefer business email)
-        const primaryEmail = enrichedData.emails[0] || null;
+        // Get best email (prefer business email) - use centralized function
+        const primaryEmail = getBestEmail(enrichedData.emails) || null;
         
         // Combine description from Maps category + website
         let description = enrichedData.description || '';

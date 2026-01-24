@@ -156,43 +156,78 @@ async function scrapeSingleWebsite(page, websiteUrl, options = {}) {
     
     // Get company name
     const companyName = await page.evaluate((pageUrl) => {
-      // Try structured data first
+      // Generic page titles to skip
+      const genericTitles = [
+        'contact us', 'contact', 'about', 'about us', 'home', 'welcome',
+        'get in touch', 'reach us', 'email us', 'phone', 'location',
+        'privacy policy', 'terms', 'terms of service', 'careers', 'jobs',
+        'blog', 'news', 'services', 'products', 'portfolio'
+      ];
+      
+      // Try structured data first (most reliable)
       const ldJson = document.querySelector('script[type="application/ld+json"]');
       if (ldJson) {
         try {
           const data = JSON.parse(ldJson.textContent);
-          if (data.name) return data.name;
-          if (data.organization?.name) return data.organization.name;
+          if (data.name && !genericTitles.includes(data.name.toLowerCase())) {
+            return data.name;
+          }
+          if (data.organization?.name && !genericTitles.includes(data.organization.name.toLowerCase())) {
+            return data.organization.name;
+          }
         } catch (e) {}
       }
       
       // Try meta tags
       const ogSiteName = document.querySelector('meta[property="og:site_name"]');
-      if (ogSiteName?.content) return ogSiteName.content;
-      
-      const ogTitle = document.querySelector('meta[property="og:title"]');
-      if (ogTitle?.content && ogTitle.content.length < 60) return ogTitle.content;
-      
-      // Try h1
-      const h1 = document.querySelector('h1');
-      if (h1?.innerText?.trim() && h1.innerText.length < 100) {
-        return h1.innerText.trim();
+      if (ogSiteName?.content && !genericTitles.includes(ogSiteName.content.toLowerCase())) {
+        return ogSiteName.content;
       }
       
-      // Fallback to title
+      const ogTitle = document.querySelector('meta[property="og:title"]');
+      if (ogTitle?.content && ogTitle.content.length < 60 && !genericTitles.includes(ogTitle.content.toLowerCase())) {
+        return ogTitle.content;
+      }
+      
+      // Try h1 (but filter out generic text)
+      const h1 = document.querySelector('h1');
+      if (h1?.innerText?.trim() && h1.innerText.length < 100) {
+        const h1Text = h1.innerText.trim();
+        if (!genericTitles.includes(h1Text.toLowerCase())) {
+          return h1Text;
+        }
+      }
+      
+      // Fallback to title (but filter out generic text)
       const title = document.title;
       if (title) {
-        return title.split('|')[0].split('-')[0].split('—')[0].split('–')[0].trim();
+        const titleText = title.split('|')[0].split('-')[0].split('—')[0].split('–')[0].trim();
+        if (!genericTitles.includes(titleText.toLowerCase())) {
+          return titleText;
+        }
       }
       
       // Last resort: domain name
       try {
         const hostname = new URL(pageUrl).hostname;
-        return hostname.replace('www.', '').split('.')[0];
+        const domainName = hostname.replace('www.', '').split('.')[0];
+        // Capitalize first letter
+        return domainName.charAt(0).toUpperCase() + domainName.slice(1);
       } catch (e) {
         return 'Unknown Company';
       }
     }, url);
+    
+    // Clean up company name - remove generic suffixes
+    let cleanedCompanyName = companyName;
+    if (cleanedCompanyName) {
+      const genericSuffixes = [' - contact us', ' | contact us', ' contact', ' - contact', ' | contact', ' - home', ' | home'];
+      genericSuffixes.forEach(suffix => {
+        if (cleanedCompanyName.toLowerCase().endsWith(suffix.toLowerCase())) {
+          cleanedCompanyName = cleanedCompanyName.substring(0, cleanedCompanyName.length - suffix.length).trim();
+        }
+      });
+    }
     
     // Get meta description
     const metaDescription = await page.evaluate(() => {
@@ -299,7 +334,7 @@ async function scrapeSingleWebsite(page, websiteUrl, options = {}) {
     
     // Build contact record
     const contactData = {
-      company: companyName,
+      company: cleanedCompanyName || companyName,
       first_name: companyName,
       last_name: '',
       email: primaryEmail,

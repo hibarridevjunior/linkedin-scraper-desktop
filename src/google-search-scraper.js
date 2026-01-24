@@ -28,25 +28,174 @@ async function extractEmailsFromSearchResults(page) {
   const results = [];
   
   try {
-    // Get all search result elements
-    const searchResults = await page.evaluate(() => {
+    // Wait for page to be stable before extracting
+    try {
+      await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+    } catch (e) {
+      console.log('Page load wait timed out, continuing...');
+    }
+    
+    // Get all search result elements - try multiple selectors for Google's changing structure
+    let searchResults = [];
+    try {
+      searchResults = await page.evaluate(() => {
       const items = [];
-      const resultElements = document.querySelectorAll('div[data-sokoban-container] a[href*="http"]');
+      const seenUrls = new Set();
+      
+      // Try multiple selector strategies - Google changes their HTML frequently
+      let resultElements = [];
+      
+      // Strategy 1: Modern Google search results
+      resultElements = document.querySelectorAll('div[data-sokoban-container] a[href*="http"]');
+      
+      // Strategy 2: Classic Google results
+      if (resultElements.length === 0) {
+        resultElements = document.querySelectorAll('div.g a[href*="http"]');
+      }
+      
+      // Strategy 3: Any div with class containing "result"
+      if (resultElements.length === 0) {
+        resultElements = document.querySelectorAll('div[class*="result"] a[href^="http"]');
+      }
+      
+      // Strategy 4: Find all links in main content area
+      if (resultElements.length === 0) {
+        const main = document.querySelector('#main') || document.querySelector('#search') || document.body;
+        resultElements = main.querySelectorAll('a[href^="http"]');
+      }
+      
+      // Strategy 5: Last resort - all links except Google's
+      if (resultElements.length === 0) {
+        resultElements = document.querySelectorAll('a[href^="http"]');
+      }
+      
+      console.log(`Found ${resultElements.length} potential result links`);
       
       resultElements.forEach((link, index) => {
-        if (index >= 10) return; // Limit to top 10 results
+        if (index >= 20) return; // Limit to top 20 results
+        if (items.length >= 10) return; // But only keep 10 unique
         
         const url = link.href;
-        const title = link.querySelector('h3')?.innerText || '';
-        const snippet = link.closest('div[data-sokoban-container]')?.querySelector('span[style*="-webkit-line-clamp"]')?.innerText || '';
+        if (!url || !url.startsWith('http')) return;
         
-        if (url && url.startsWith('http')) {
-          items.push({ url, title, snippet });
+        // Skip Google's own pages and common non-result links
+        if (url.includes('google.com') || 
+            url.includes('youtube.com') || 
+            url.includes('maps.google.com') ||
+            url.includes('accounts.google.com') ||
+            url.includes('policies.google.com') ||
+            url.includes('support.google.com') ||
+            url.startsWith('https://www.google.com/search') ||
+            url.includes('webcache') ||
+            url.includes('translate.google')) {
+          return;
         }
+        
+        // Skip if we've seen this URL
+        if (seenUrls.has(url)) return;
+        seenUrls.add(url);
+        
+        // Try to find title
+        let title = '';
+        const h3 = link.querySelector('h3');
+        if (h3) {
+          title = h3.innerText || h3.textContent || '';
+        } else {
+          // Look for h3 in parent containers
+          const container = link.closest('div');
+          if (container) {
+            const h3InContainer = container.querySelector('h3');
+            if (h3InContainer) {
+              title = h3InContainer.innerText || h3InContainer.textContent || '';
+            }
+          }
+        }
+        if (!title) {
+          title = link.textContent?.trim() || link.innerText?.trim() || '';
+        }
+        
+        // Try multiple ways to find snippet
+        const container = link.closest('div[data-sokoban-container]') || 
+                         link.closest('div.g') || 
+                         link.closest('div[class*="result"]') ||
+                         link.closest('div[class*="MjjYud"]') ||
+                         link.parentElement?.parentElement;
+        
+        let snippet = '';
+        if (container) {
+          snippet = container.querySelector('span[style*="-webkit-line-clamp"]')?.innerText ||
+                   container.querySelector('.VwiC3b')?.innerText ||
+                   container.querySelector('span[class*="st"]')?.innerText ||
+                   container.querySelector('div[class*="VwiC3b"]')?.innerText ||
+                   container.textContent?.trim() || '';
+        }
+        
+        // Clean up snippet (remove title from it)
+        if (snippet && title) {
+          snippet = snippet.replace(title, '').trim();
+        }
+        
+        items.push({ url, title: title.substring(0, 200), snippet: snippet.substring(0, 500) });
       });
       
-      return items;
-    });
+        console.log(`Returning ${items.length} unique search results`);
+        return items;
+      });
+    } catch (error) {
+      if (error.message.includes('Execution context was destroyed') || 
+          error.message.includes('navigation')) {
+        console.log('Page navigated during evaluation, retrying after wait...');
+        await randomSleep(3000, 5000);
+        // Retry once with simpler extraction
+        try {
+          searchResults = await page.evaluate(() => {
+            const items = [];
+            const seenUrls = new Set();
+            const links = document.querySelectorAll('a[href^="http"]');
+            
+            links.forEach((link, index) => {
+              if (index >= 30 || items.length >= 10) return;
+              const url = link.href;
+              if (!url || !url.startsWith('http') || seenUrls.has(url)) return;
+              if (url.includes('google.com') || url.includes('youtube.com')) return;
+              seenUrls.add(url);
+              const title = link.querySelector('h3')?.innerText || link.textContent?.trim() || '';
+              items.push({ url, title: title.substring(0, 200), snippet: '' });
+            });
+            return items;
+          });
+        } catch (retryError) {
+          console.log('Retry also failed:', retryError.message);
+          searchResults = [];
+        }
+      } else {
+        console.log('Error extracting search results:', error.message);
+        searchResults = [];
+      }
+    }
+    
+    console.log(`Found ${searchResults.length} search results`);
+    
+    // Debug: Log page structure if no results found
+    if (searchResults.length === 0) {
+      let pageInfo = {};
+      try {
+        pageInfo = await page.evaluate(() => {
+        return {
+          title: document.title,
+          hasMain: !!document.querySelector('#main'),
+          hasSearch: !!document.querySelector('#search'),
+          hasSokoban: !!document.querySelector('div[data-sokoban-container]'),
+          hasG: document.querySelectorAll('div.g').length,
+          allLinks: document.querySelectorAll('a[href^="http"]').length,
+          bodyText: document.body.innerText.substring(0, 500)
+        };
+        });
+      } catch (e) {
+        console.log('Could not get page debug info:', e.message);
+      }
+      console.log('Page debug info:', pageInfo);
+    }
     
     // Extract emails from snippets
     for (const result of searchResults) {
@@ -63,6 +212,8 @@ async function extractEmailsFromSearchResults(page) {
         });
       }
     }
+    
+    console.log(`Found ${results.length} emails in search result snippets`);
   } catch (error) {
     console.log('Error extracting from search results:', error.message);
   }
@@ -84,14 +235,31 @@ async function extractEmailsFromPage(page, url, companyName) {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
     await randomSleep(2000, 3000);
     
-    // Get page content
-    const pageContent = await page.evaluate(() => {
-      return {
-        text: document.body.innerText || '',
-        html: document.body.innerHTML || '',
-        title: document.title || ''
-      };
-    });
+    // Wait for page to be stable
+    try {
+      await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+    } catch (e) {
+      // Ignore timeout
+    }
+    
+    // Get page content with error handling
+    let pageContent = { text: '', html: '', title: '' };
+    try {
+      pageContent = await page.evaluate(() => {
+        return {
+          text: document.body.innerText || '',
+          html: document.body.innerHTML || '',
+          title: document.title || ''
+        };
+      });
+    } catch (error) {
+      if (error.message.includes('Execution context was destroyed') || 
+          error.message.includes('navigation')) {
+        console.log(`Page navigated during content extraction for ${url}, skipping...`);
+        return contacts;
+      }
+      throw error;
+    }
     
     // Extract all emails
     const allEmails = extractEmails(pageContent.text, pageContent.html);
@@ -100,10 +268,77 @@ async function extractEmailsFromPage(page, url, companyName) {
     // Get company name from page if not provided
     let company = companyName;
     if (!company) {
-      company = await page.evaluate(() => {
-        const h1 = document.querySelector('h1')?.innerText;
-        const title = document.title.split('|')[0].split('-')[0].trim();
-        return h1 || title || '';
+      try {
+        company = await page.evaluate(() => {
+          // Generic page titles to skip
+          const genericTitles = [
+            'contact us', 'contact', 'about', 'about us', 'home', 'welcome',
+            'get in touch', 'reach us', 'email us', 'phone', 'location',
+            'privacy policy', 'terms', 'terms of service', 'careers', 'jobs',
+            'blog', 'news', 'services', 'products', 'portfolio'
+          ];
+          
+          // Try structured data first (most reliable)
+          const ldJson = document.querySelector('script[type="application/ld+json"]');
+          if (ldJson) {
+            try {
+              const data = JSON.parse(ldJson.textContent);
+              if (data.name && !genericTitles.includes(data.name.toLowerCase())) {
+                return data.name;
+              }
+              if (data.organization?.name && !genericTitles.includes(data.organization.name.toLowerCase())) {
+                return data.organization.name;
+              }
+            } catch (e) {}
+          }
+          
+          // Try meta tags
+          const ogSiteName = document.querySelector('meta[property="og:site_name"]');
+          if (ogSiteName?.content && !genericTitles.includes(ogSiteName.content.toLowerCase())) {
+            return ogSiteName.content;
+          }
+          
+          // Try h1 (but filter out generic text)
+          const h1 = document.querySelector('h1')?.innerText?.trim();
+          if (h1 && h1.length < 60 && !genericTitles.includes(h1.toLowerCase())) {
+            return h1;
+          }
+          
+          // Try page title (but filter out generic text)
+          const title = document.title.split('|')[0].split('-')[0].split('—')[0].split('–')[0].trim();
+          if (title && title.length < 60 && !genericTitles.includes(title.toLowerCase())) {
+            return title;
+          }
+          
+          // Extract from URL domain as last resort
+          try {
+            const hostname = new URL(window.location.href).hostname;
+            const domainName = hostname.replace('www.', '').split('.')[0];
+            // Capitalize first letter
+            return domainName.charAt(0).toUpperCase() + domainName.slice(1);
+          } catch (e) {
+            return '';
+          }
+        });
+      } catch (e) {
+        // If evaluation fails, try to extract from URL
+        try {
+          const urlObj = new URL(url);
+          const domainName = urlObj.hostname.replace('www.', '').split('.')[0];
+          company = domainName.charAt(0).toUpperCase() + domainName.slice(1);
+        } catch (e2) {
+          company = '';
+        }
+      }
+    }
+    
+    // Clean up company name - remove generic suffixes
+    if (company) {
+      const genericSuffixes = [' - contact us', ' | contact us', ' contact', ' - contact', ' | contact'];
+      genericSuffixes.forEach(suffix => {
+        if (company.toLowerCase().endsWith(suffix.toLowerCase())) {
+          company = company.substring(0, company.length - suffix.length).trim();
+        }
       });
     }
     
@@ -176,12 +411,76 @@ async function runGoogleSearchScraper(searchQuery, maxResults = 20, industry = n
     }
     
     const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 60000 });
     await randomSleep(3000, 5000);
     
-    // Wait for results
-    await page.waitForSelector('div[data-sokoban-container]', { timeout: 15000 }).catch(() => {});
+    // Wait for results - try multiple selectors
+    try {
+      await page.waitForSelector('div[data-sokoban-container], div.g, #main, #search', { timeout: 15000 });
+    } catch (e) {
+      console.log('Waiting for search results timed out, continuing anyway...');
+    }
     await randomSleep(2000, 3000);
+    
+    // Check if we're on a CAPTCHA page
+    let isCaptcha = false;
+    try {
+      isCaptcha = await page.evaluate(() => {
+        const bodyText = document.body.innerText.toLowerCase();
+        return bodyText.includes('captcha') || 
+               bodyText.includes('unusual traffic') ||
+               bodyText.includes('verify you\'re not a robot') ||
+               bodyText.includes('verify you are not a robot') ||
+               document.querySelector('form[action*="captcha"]') !== null ||
+               document.querySelector('iframe[src*="recaptcha"]') !== null;
+      });
+    } catch (e) {
+      console.log('Could not check for CAPTCHA:', e.message);
+    }
+    
+    if (isCaptcha) {
+      progressCallback({
+        status: '⚠️ Google CAPTCHA detected. Please solve it in the browser window, then the scraper will continue automatically...',
+        profilesFound: 0,
+        profilesScraped: 0,
+        phase: 'captcha'
+      });
+      
+      // Wait for user to solve CAPTCHA (up to 2 minutes)
+      console.log('Waiting for CAPTCHA to be solved...');
+      let captchaSolved = false;
+      const maxWaitTime = 120000; // 2 minutes
+      const startTime = Date.now();
+      
+      while (!captchaSolved && (Date.now() - startTime) < maxWaitTime) {
+        await randomSleep(3000, 5000);
+        
+        let stillCaptcha = false;
+        try {
+          stillCaptcha = await page.evaluate(() => {
+            const bodyText = document.body.innerText.toLowerCase();
+            return bodyText.includes('captcha') || 
+                   bodyText.includes('unusual traffic') ||
+                   bodyText.includes('verify you\'re not a robot') ||
+                   document.querySelector('iframe[src*="recaptcha"]') !== null;
+          });
+        } catch (e) {
+          // If evaluation fails, assume CAPTCHA is still there
+          stillCaptcha = true;
+        }
+        
+        if (!stillCaptcha) {
+          captchaSolved = true;
+          console.log('CAPTCHA appears to be solved, continuing...');
+          await randomSleep(2000, 3000);
+          break;
+        }
+      }
+      
+      if (!captchaSolved) {
+        throw new Error('CAPTCHA not solved within 2 minutes. Please try again or use a different source.');
+      }
+    }
     
     // ========== PHASE 2: EXTRACT EMAILS FROM SEARCH RESULTS ==========
     progressCallback({ 
@@ -204,8 +503,33 @@ async function runGoogleSearchScraper(searchQuery, maxResults = 20, industry = n
         phase: 'extract'
       });
       
+      // Extract better company name from URL if title is generic
+      let companyName = result.title || null;
+      if (companyName) {
+        const genericTitles = ['contact us', 'contact', 'about', 'home', 'welcome'];
+        if (genericTitles.includes(companyName.toLowerCase().trim())) {
+          // Extract from URL instead
+          try {
+            const urlObj = new URL(result.url);
+            const domainName = urlObj.hostname.replace('www.', '').split('.')[0];
+            companyName = domainName.charAt(0).toUpperCase() + domainName.slice(1);
+          } catch (e) {
+            companyName = null;
+          }
+        }
+      } else {
+        // Extract from URL if no title
+        try {
+          const urlObj = new URL(result.url);
+          const domainName = urlObj.hostname.replace('www.', '').split('.')[0];
+          companyName = domainName.charAt(0).toUpperCase() + domainName.slice(1);
+        } catch (e) {
+          companyName = null;
+        }
+      }
+      
       const contact = createContactFromEmail(result.email, result.context, {
-        company: result.title || null,
+        company: companyName,
         company_website: result.url,
         source: 'google_search',
         industry,
@@ -220,16 +544,81 @@ async function runGoogleSearchScraper(searchQuery, maxResults = 20, industry = n
     }
     
     // ========== PHASE 3: VISIT TOP RESULTS FOR MORE EMAILS ==========
-    if (scrapedContacts.length < maxResults) {
-      progressCallback({ 
-        status: 'Visiting top search results for more emails...', 
-        profilesFound: emailResults.length, 
-        profilesScraped: scrapedContacts.length,
-        phase: 'visit'
-      });
-      
-      // Get unique URLs from search results
-      const uniqueUrls = [...new Set(emailResults.map(r => r.url))].slice(0, 5);
+    // Always visit pages to extract emails (snippets rarely have emails)
+    progressCallback({ 
+      status: 'Visiting top search results for more emails...', 
+      profilesFound: emailResults.length || 10, 
+      profilesScraped: scrapedContacts.length,
+      phase: 'visit'
+    });
+    
+    // Get URLs from search results, or extract URLs directly from page if no emailResults
+    let uniqueUrls = [];
+    if (emailResults.length > 0) {
+      uniqueUrls = [...new Set(emailResults.map(r => r.url))].slice(0, Math.min(10, maxResults));
+    } else {
+      // If no emails found in snippets, extract URLs directly from search page
+      console.log('No emails in snippets, extracting URLs from search results...');
+      try {
+        uniqueUrls = await page.evaluate(() => {
+        const urls = [];
+        const seen = new Set();
+        
+        // Try multiple strategies to find result URLs
+        let links = document.querySelectorAll('div[data-sokoban-container] a[href^="http"]');
+        if (links.length === 0) {
+          links = document.querySelectorAll('div.g a[href^="http"]');
+        }
+        if (links.length === 0) {
+          links = document.querySelectorAll('div[class*="result"] a[href^="http"]');
+        }
+        if (links.length === 0) {
+          const main = document.querySelector('#main') || document.querySelector('#search');
+          if (main) {
+            links = main.querySelectorAll('a[href^="http"]');
+          }
+        }
+        
+        links.forEach(link => {
+          const url = link.href;
+          if (!url || seen.has(url)) return;
+          
+          // Skip Google's own pages
+          if (url.includes('google.com') || 
+              url.includes('youtube.com') || 
+              url.includes('maps.google.com') ||
+              url.includes('accounts.google.com') ||
+              url.startsWith('https://www.google.com/search') ||
+              url.includes('webcache') ||
+              url.includes('translate.google')) {
+            return;
+          }
+          
+          seen.add(url);
+          urls.push(url);
+        });
+        
+            return urls.slice(0, 10);
+        });
+      } catch (error) {
+        if (error.message.includes('Execution context was destroyed') || 
+            error.message.includes('navigation')) {
+          console.log('Page navigated during URL extraction, using searchResults URLs...');
+          // Try to get URLs from searchResults we already have
+          if (searchResults && searchResults.length > 0) {
+            uniqueUrls = [...new Set(searchResults.map(r => r.url))].slice(0, 10);
+          } else {
+            uniqueUrls = [];
+          }
+        } else {
+          console.log('Error extracting URLs:', error.message);
+          uniqueUrls = [];
+        }
+      }
+      console.log(`Extracted ${uniqueUrls.length} URLs to visit`);
+    }
+    
+    if (uniqueUrls.length > 0 && scrapedContacts.length < maxResults) {
       
       for (let i = 0; i < uniqueUrls.length && scrapedContacts.length < maxResults; i++) {
         const url = uniqueUrls[i];
@@ -268,6 +657,8 @@ async function runGoogleSearchScraper(searchQuery, maxResults = 20, industry = n
         
         await randomSleep(2000, 4000);
       }
+    } else {
+      console.log('No URLs found to visit or already reached max results');
     }
     
     // ========== PHASE 4: SAVE TO DATABASE ==========

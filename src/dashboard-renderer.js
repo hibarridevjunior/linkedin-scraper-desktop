@@ -335,7 +335,7 @@ function renderTable() {
       if (tableContainer) tableContainer.style.display = "none";
       if (emptyState) emptyState.style.display = "block";
     } else {
-      tableBody.innerHTML = `<tr><td colspan="10" style="text-align: center; padding: 40px; color: #999;">No contacts match your filters</td></tr>`;
+      tableBody.innerHTML = `<tr><td colspan="11" style="text-align: center; padding: 40px; color: #999;">No contacts match your filters</td></tr>`;
     }
     return;
   }
@@ -417,10 +417,50 @@ function renderTable() {
           </svg>
           Invalid
         </span>`;
+    } else if (contact.verification_status === 'quota_exceeded') {
+      verifiedBadge = `
+        <span class="verified-badge quota-exceeded" title="API quota exceeded - could not verify">
+          <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+          </svg>
+          Quota Exceeded
+        </span>`;
     } else if (contact.email && contact.email !== '-') {
       verifiedBadge = '<span class="verified-badge unverified">Unverified</span>';
     } else {
       verifiedBadge = '<span class="verified-badge no-email">No Email</span>';
+    }
+
+    // Format date added
+    let dateAdded = "-";
+    if (contact.created_at) {
+      try {
+        const date = new Date(contact.created_at);
+        const now = new Date();
+        const diffMs = now - date;
+        const diffMins = Math.floor(diffMs / 60000);
+        const diffHours = Math.floor(diffMs / 3600000);
+        const diffDays = Math.floor(diffMs / 86400000);
+
+        if (diffMins < 1) {
+          dateAdded = "Just now";
+        } else if (diffMins < 60) {
+          dateAdded = `${diffMins}m ago`;
+        } else if (diffHours < 24) {
+          dateAdded = `${diffHours}h ago`;
+        } else if (diffDays < 7) {
+          dateAdded = `${diffDays}d ago`;
+        } else {
+          // Format as date: Jan 15, 2024
+          dateAdded = date.toLocaleDateString('en-US', { 
+            month: 'short', 
+            day: 'numeric', 
+            year: date.getFullYear() !== now.getFullYear() ? 'numeric' : undefined 
+          });
+        }
+      } catch (e) {
+        dateAdded = "-";
+      }
     }
 
     row.innerHTML = `
@@ -433,6 +473,7 @@ function renderTable() {
       <td>${location}</td>
       <td>${sourceBadge}</td>
       <td>${verifiedBadge}</td>
+      <td><span class="date-added" title="${contact.created_at ? new Date(contact.created_at).toLocaleString() : ''}">${dateAdded}</span></td>
       <td>
         <button class="btn-delete" data-id="${contact.id}" title="Delete">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -598,11 +639,19 @@ async function verifySelectedEmails() {
         }
       });
 
+      // Count quota exceeded
+      const quotaExceededCount = result.results.filter(r => r.status === 'quota_exceeded').length;
+      
       // Show friendly results
       let message = `✅ Verification Complete!\n\n`;
       message += `📧 Checked: ${result.results.length} emails\n`;
       message += `✓ Valid: ${verifiedCount}\n`;
-      message += `✗ Invalid/Risky: ${result.results.length - verifiedCount}`;
+      message += `✗ Invalid/Risky: ${result.results.length - verifiedCount - quotaExceededCount}`;
+      
+      if (quotaExceededCount > 0) {
+        message += `\n⚠️ Quota Exceeded: ${quotaExceededCount} emails could not be verified`;
+        message += `\n\n💡 Tip: Upgrade your Abstract API plan or use a different API key to verify more emails.`;
+      }
       
       alert(message);
     } else {
@@ -743,6 +792,10 @@ function sortTable(column) {
     if (column === 'email_verified') {
       aVal = a.email_verified ? 1 : 0;
       bVal = b.email_verified ? 1 : 0;
+    } else if (column === 'created_at') {
+      // Special handling for dates
+      aVal = a.created_at ? new Date(a.created_at).getTime() : 0;
+      bVal = b.created_at ? new Date(b.created_at).getTime() : 0;
     } else if (typeof aVal === "string") {
       aVal = aVal.toLowerCase();
       bVal = bVal.toLowerCase();
