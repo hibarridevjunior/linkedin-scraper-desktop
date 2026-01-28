@@ -1,3 +1,49 @@
+// Import email extractor for name extraction (with fallback)
+let extractNameFromEmail;
+try {
+  const emailExtractor = require('./email-extractor');
+  extractNameFromEmail = emailExtractor.extractNameFromEmail;
+} catch (e) {
+  // Fallback function if require fails
+  extractNameFromEmail = function(email) {
+    if (!email || typeof email !== 'string') return null;
+    const localPart = email.split('@')[0].toLowerCase();
+    if (localPart.length < 3 || /^[0-9]+$/.test(localPart)) return null;
+    
+    // Pattern 1: first.last
+    if (localPart.includes('.')) {
+      const parts = localPart.split('.');
+      if (parts.length >= 2 && parts[0].length >= 2 && parts[1].length >= 2) {
+        const firstName = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
+        const lastName = parts.slice(1).map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
+        return { firstName, lastName, fullName: `${firstName} ${lastName}` };
+      }
+    }
+    
+    // Pattern 2: first_last
+    if (localPart.includes('_')) {
+      const parts = localPart.split('_');
+      if (parts.length >= 2 && parts[0].length >= 2 && parts[1].length >= 2) {
+        const firstName = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
+        const lastName = parts.slice(1).map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
+        return { firstName, lastName, fullName: `${firstName} ${lastName}` };
+      }
+    }
+    
+    // Pattern 3: first-last
+    if (localPart.includes('-')) {
+      const parts = localPart.split('-');
+      if (parts.length >= 2 && parts[0].length >= 2 && parts[1].length >= 2) {
+        const firstName = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
+        const lastName = parts.slice(1).map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
+        return { firstName, lastName, fullName: `${firstName} ${lastName}` };
+      }
+    }
+    
+    return null;
+  };
+}
+
 // DOM elements
 const tableBody = document.getElementById("tableBody");
 const emptyState = document.getElementById("emptyState");
@@ -108,6 +154,13 @@ async function init() {
   if (window.electronAPI.onVerificationProgress) {
     window.electronAPI.onVerificationProgress((data) => {
       updateVerificationProgress(data);
+    });
+  }
+  
+  // Listen for quota exceeded events
+  if (window.electronAPI && window.electronAPI.onQuotaExceeded) {
+    window.electronAPI.onQuotaExceeded((data) => {
+      showQuotaExceededBanner(data);
     });
   }
 
@@ -314,7 +367,19 @@ function populatePreviewContacts() {
   contactsWithEmail.forEach(contact => {
     const option = document.createElement('option');
     option.value = contact.id;
-    const name = `${contact.first_name || ''} ${contact.last_name || ''}`.trim() || contact.company || 'Unknown';
+    // Extract name from email if available
+    let name = "";
+    if (contact.email) {
+      const emailName = extractNameFromEmail(contact.email);
+      if (emailName && emailName.fullName) {
+        name = emailName.fullName;
+      }
+    }
+    
+    if (!name) {
+      name = `${contact.first_name || ''} ${contact.last_name || ''}`.trim() || contact.company || 'Unknown';
+    }
+    
     option.textContent = `${name} (${contact.email})`;
     previewSelect.appendChild(option);
   });
@@ -348,10 +413,27 @@ function renderTable() {
     const row = document.createElement("tr");
     row.dataset.contactId = contact.id;
 
-    // Name display
-    const name = contact.source === "linkedin"
-      ? `${contact.first_name || ""} ${contact.last_name || ""}`.trim()
-      : contact.company || contact.first_name || "N/A";
+    // Name display - prioritize person's name from email if available
+    let name = "";
+    if (contact.source === "linkedin") {
+      name = `${contact.first_name || ""} ${contact.last_name || ""}`.trim();
+    } else {
+      // For non-LinkedIn sources, try to extract name from email first
+      if (contact.email) {
+        const emailName = extractNameFromEmail(contact.email);
+        if (emailName && emailName.fullName) {
+          name = emailName.fullName;
+        } else {
+          // Fall back to stored first_name/last_name if available
+          name = `${contact.first_name || ""} ${contact.last_name || ""}`.trim();
+        }
+      }
+      
+      // If still no name, use company or first_name
+      if (!name || name === "") {
+        name = contact.company || contact.first_name || "N/A";
+      }
+    }
 
     const email = contact.email || "-";
     const company = contact.company || "-";
@@ -640,7 +722,17 @@ async function verifySelectedEmails() {
       });
 
       // Count quota exceeded
-      const quotaExceededCount = result.results.filter(r => r.status === 'quota_exceeded').length;
+      const quotaExceededCount = result.quotaExceededCount || result.results.filter(r => r.status === 'quota_exceeded').length;
+      
+      // Show quota banner if quota was exceeded
+      if (result.quotaExceeded || quotaExceededCount > 0) {
+        showQuotaExceededBanner({
+          message: `API quota exhausted. ${quotaExceededCount} email(s) could not be verified.`,
+          verifiedCount: verifiedCount,
+          totalAttempted: result.results.length,
+          remaining: quotaExceededCount
+        });
+      }
       
       // Show friendly results
       let message = `✅ Verification Complete!\n\n`;
@@ -649,8 +741,12 @@ async function verifySelectedEmails() {
       message += `✗ Invalid/Risky: ${result.results.length - verifiedCount - quotaExceededCount}`;
       
       if (quotaExceededCount > 0) {
-        message += `\n⚠️ Quota Exceeded: ${quotaExceededCount} emails could not be verified`;
-        message += `\n\n💡 Tip: Upgrade your Abstract API plan or use a different API key to verify more emails.`;
+        message += `\n\n⚠️ QUOTA EXCEEDED: ${quotaExceededCount} email(s) could not be verified`;
+        message += `\n\n💡 Solutions:`;
+        message += `\n   • Upgrade your Abstract API plan at abstractapi.com`;
+        message += `\n   • Use a different API key`;
+        message += `\n   • Wait for quota reset (usually monthly)`;
+        message += `\n\n📊 A notification banner has been displayed at the top of the screen.`;
       }
       
       alert(message);
@@ -713,8 +809,16 @@ function applyFilters() {
       const searchableText = [
         contact.first_name, contact.last_name, contact.email,
         contact.company, contact.job_title, contact.location, 
-        contact.industry, contact.keywords
+        contact.industry, contact.keywords,
+        contact.search_query // Include original search query in search
       ].filter(Boolean).join(" ").toLowerCase();
+      
+      // Debug: Log first few contacts' search_query when searching
+      const contactIndex = filteredContacts.indexOf(contact);
+      if (contactIndex < 3) {
+        console.log(`Contact ${contactIndex + 1} - search_query:`, contact.search_query, '| searchable:', searchableText.substring(0, 100));
+      }
+      
       if (!searchableText.includes(searchTerm)) return false;
     }
 
@@ -820,7 +924,27 @@ function sortTable(column) {
 
 // Export to CSV
 function exportToCSV() {
-  if (filteredContacts.length === 0) {
+  // Determine which contacts to export: selected ones if any, otherwise all filtered
+  let contactsToExport = [];
+  
+  if (selectedContacts.size > 0) {
+    // Export only selected contacts
+    const selectedIds = Array.from(selectedContacts);
+    contactsToExport = filteredContacts.filter((contact) => selectedIds.includes(contact.id));
+    
+    if (contactsToExport.length === 0) {
+      alert("No selected contacts found. Please select contacts to export.");
+      return;
+    }
+    
+    console.log(`Exporting ${contactsToExport.length} selected contacts out of ${filteredContacts.length} filtered`);
+  } else {
+    // Export all filtered contacts if none selected
+    contactsToExport = filteredContacts;
+    console.log(`Exporting all ${contactsToExport.length} filtered contacts (none selected)`);
+  }
+  
+  if (contactsToExport.length === 0) {
     alert("No contacts to export");
     return;
   }
@@ -830,10 +954,24 @@ function exportToCSV() {
     "Phone", "WhatsApp", "Mobile", "Location", "Source", "Verified", "Website"
   ];
   
-  const rows = filteredContacts.map((contact) => {
-    const name = contact.source === "linkedin"
-      ? `${contact.first_name || ""} ${contact.last_name || ""}`.trim()
-      : contact.company || contact.first_name || "";
+  const rows = contactsToExport.map((contact) => {
+    // Extract name from email if available
+    let name = "";
+    if (contact.email) {
+      const emailName = extractNameFromEmail(contact.email);
+      if (emailName && emailName.fullName) {
+        name = emailName.fullName;
+      }
+    }
+    
+    // Fallback logic
+    if (!name) {
+      if (contact.source === "linkedin") {
+        name = `${contact.first_name || ""} ${contact.last_name || ""}`.trim();
+      } else {
+        name = `${contact.first_name || ""} ${contact.last_name || ""}`.trim() || contact.company || contact.first_name || "";
+      }
+    }
 
     return [
       name,
@@ -861,7 +999,8 @@ function exportToCSV() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `contacts_export_${new Date().toISOString().split("T")[0]}.csv`;
+  const countText = selectedContacts.size > 0 ? `_${contactsToExport.length}_selected` : '';
+  a.download = `contacts_export_${new Date().toISOString().split("T")[0]}${countText}.csv`;
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -1161,7 +1300,17 @@ function setupEmailComposer() {
         sampleContact = {
           first_name: contact.first_name || '',
           last_name: contact.last_name || '',
-          full_name: [contact.first_name, contact.last_name].filter(Boolean).join(' '),
+          full_name: (() => {
+            // Try to extract from email first
+            if (contact.email) {
+              const emailName = extractNameFromEmail(contact.email);
+              if (emailName && emailName.fullName) {
+                return emailName.fullName;
+              }
+            }
+            // Fallback to stored name
+            return [contact.first_name, contact.last_name].filter(Boolean).join(' ');
+          })(),
           email: contact.email || '',
           company: contact.company || '',
           job_title: contact.job_title || '',
@@ -1383,7 +1532,17 @@ function replaceVariables(template, contact) {
   const replacements = {
     '{{first_name}}': contact.first_name || '',
     '{{last_name}}': contact.last_name || '',
-    '{{full_name}}': contact.full_name || [contact.first_name, contact.last_name].filter(Boolean).join(' '),
+    '{{full_name}}': (() => {
+      // Try to extract from email first
+      if (contact.email) {
+        const emailName = extractNameFromEmail(contact.email);
+        if (emailName && emailName.fullName) {
+          return emailName.fullName;
+        }
+      }
+      // Fallback to stored name
+      return contact.full_name || [contact.first_name, contact.last_name].filter(Boolean).join(' ');
+    })(),
     '{{email}}': contact.email || '',
     '{{company}}': contact.company || '',
     '{{job_title}}': contact.job_title || '',
@@ -1437,7 +1596,19 @@ function openEmailComposer() {
       recipientsList.innerHTML = '<p class="no-recipients">No recipients selected</p>';
     } else {
       recipientsList.innerHTML = currentCampaignRecipients.slice(0, 10).map(contact => {
-        const name = `${contact.first_name || ''} ${contact.last_name || ''}`.trim() || contact.company || 'Unknown';
+        // Extract name from email if available
+        let name = "";
+        if (contact.email) {
+          const emailName = extractNameFromEmail(contact.email);
+          if (emailName && emailName.fullName) {
+            name = emailName.fullName;
+          }
+        }
+        
+        if (!name) {
+          name = `${contact.first_name || ''} ${contact.last_name || ''}`.trim() || contact.company || 'Unknown';
+        }
+        
         const initials = name.split(' ').map(n => n[0]).join('').substring(0, 2).toUpperCase();
         return `
           <div class="recipient-item">
@@ -2010,7 +2181,17 @@ function showCsvPreview(headers, data) {
   previewBody.innerHTML = previewRows.map(row => `
     <tr>
       <td>${row.email || '-'}</td>
-      <td>${[row.first_name, row.last_name].filter(Boolean).join(' ') || '-'}</td>
+      <td>${(() => {
+        // Try to extract from email first
+        if (row.email) {
+          const emailName = extractNameFromEmail(row.email);
+          if (emailName && emailName.fullName) {
+            return emailName.fullName;
+          }
+        }
+        // Fallback to stored name
+        return [row.first_name, row.last_name].filter(Boolean).join(' ') || '-';
+      })()}</td>
       <td>${row.company || '-'}</td>
       <td>${row.job_title || '-'}</td>
     </tr>
@@ -2026,3 +2207,42 @@ function showCsvPreview(headers, data) {
 
 // Initialize import modal after DOM is ready
 setTimeout(setupImportModal, 100);
+
+// ============================================
+// QUOTA EXCEEDED BANNER
+// ============================================
+
+function showQuotaExceededBanner(data) {
+  const banner = document.getElementById('quotaExceededBanner');
+  const bannerMessage = document.getElementById('quotaBannerMessage');
+  const dismissBtn = document.getElementById('dismissQuotaBanner');
+  
+  if (!banner || !bannerMessage) return;
+  
+  // Set message
+  let message = data.message || 'The Abstract Email Reputation API quota has been exhausted.';
+  if (data.verifiedCount !== undefined) {
+    message += ` ${data.verifiedCount} email(s) were verified before quota was reached.`;
+  }
+  if (data.remaining !== undefined && data.remaining > 0) {
+    message += ` ${data.remaining} email(s) could not be verified.`;
+  }
+  message += ' Upgrade your plan or use a different API key to continue.';
+  
+  bannerMessage.textContent = message;
+  banner.style.display = 'block';
+  
+  // Add dismiss handler
+  if (dismissBtn) {
+    dismissBtn.onclick = () => {
+      banner.style.display = 'none';
+    };
+  }
+  
+  // Auto-dismiss after 30 seconds (optional)
+  setTimeout(() => {
+    if (banner.style.display === 'block') {
+      banner.style.display = 'none';
+    }
+  }, 30000);
+}

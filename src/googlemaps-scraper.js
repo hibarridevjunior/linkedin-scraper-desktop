@@ -48,6 +48,12 @@ function randomSleep(min = 1000, max = 3000) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Helper function to truncate strings to database column limits
+function truncateField(value, maxLength = 100) {
+  if (!value || typeof value !== 'string') return value;
+  return value.length > maxLength ? value.substring(0, maxLength) : value;
+}
+
 function cleanPhoneNumber(phone) {
   if (!phone) return null;
   let cleaned = phone.replace(/[^\d+]/g, '');
@@ -138,7 +144,7 @@ async function enrichFromWebsite(page, websiteUrl, businessName, progressCallbac
     url = url.replace(/\/$/, '');
 
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
-    await randomSleep(1500, 2500);
+    await randomSleep(500, 800); // Small delay for page stability
 
     // Get meta description
     const metaDescription = await page.evaluate(() => {
@@ -191,7 +197,7 @@ async function enrichFromWebsite(page, websiteUrl, businessName, progressCallbac
     if (contactLinks.length > 0) {
       try {
         await page.goto(contactLinks[0], { waitUntil: 'domcontentloaded', timeout: 15000 });
-        await randomSleep(1000, 2000);
+        await randomSleep(500, 800); // Small delay for page stability
         
         const contactText = await page.evaluate(() => document.body.innerText || '');
         const contactHtml = await page.evaluate(() => document.body.innerHTML || '');
@@ -246,7 +252,7 @@ async function enrichFromWebsite(page, websiteUrl, businessName, progressCallbac
     if (aboutLinks.length > 0) {
       try {
         await page.goto(aboutLinks[0], { waitUntil: 'domcontentloaded', timeout: 15000 });
-        await randomSleep(1000, 2000);
+        await randomSleep(500, 800); // Small delay for page stability
         
         const aboutDesc = await page.evaluate(() => {
           const paragraphs = Array.from(document.querySelectorAll('p'));
@@ -274,7 +280,7 @@ async function enrichFromWebsite(page, websiteUrl, businessName, progressCallbac
     if (teamLinks.length > 0) {
       try {
         await page.goto(teamLinks[0], { waitUntil: 'domcontentloaded', timeout: 15000 });
-        await randomSleep(1000, 2000);
+        await randomSleep(500, 800); // Small delay for page stability
         
         const teamText = await page.evaluate(() => document.body.innerText || '');
         const teamHtml = await page.evaluate(() => document.body.innerHTML || '');
@@ -309,6 +315,7 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
   
   // Options for enrichment
   const enableEnrichment = options.enableEnrichment !== false; // Default: true
+  const checkCancellation = options.checkCancellation || (() => false);
   
   try {
     progressCallback({ 
@@ -334,20 +341,66 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
     page.setDefaultTimeout(60000);
     
     // ========== PHASE 1: COLLECT BUSINESSES FROM GOOGLE MAPS ==========
-    progressCallback({ 
-      status: `Phase 1: Searching Google Maps for "${searchQuery}"...`, 
-      profilesFound: 0, 
-      profilesScraped: 0,
-      phase: 'maps_search'
-    });
     
-    const searchUrl = `https://www.google.com/maps/search/${encodeURIComponent(searchQuery)}/@-26.0,28.0,7z`;
+    // Detect if query is a domain/URL and convert to company name
+    let processedQuery = searchQuery;
+    const isDomainOrUrl = /^https?:\/\//.test(searchQuery) || /\.(com|co\.za|net|org|io|co|za|za\.com)/i.test(searchQuery);
+    
+    if (isDomainOrUrl) {
+      // Extract company name from domain
+      try {
+        const urlObj = new URL(searchQuery.startsWith('http') ? searchQuery : `https://${searchQuery}`);
+        const hostname = urlObj.hostname.replace('www.', '');
+        const domainParts = hostname.split('.');
+        
+        // Get the main domain name (before TLD)
+        let companyName = domainParts[0];
+        
+        // Handle .co.za domains
+        if (hostname.includes('.co.za')) {
+          companyName = hostname.split('.co.za')[0].split('.').pop();
+        } else if (domainParts.length >= 2) {
+          companyName = domainParts[domainParts.length - 2];
+        }
+        
+        // Capitalize and clean up
+        companyName = companyName.charAt(0).toUpperCase() + companyName.slice(1).replace(/[^a-zA-Z0-9]/g, ' ');
+        
+        processedQuery = companyName;
+        progressCallback({ 
+          status: `Detected domain "${searchQuery}", searching for company "${companyName}"...`, 
+          profilesFound: 0, 
+          profilesScraped: 0,
+          phase: 'maps_search'
+        });
+      } catch (e) {
+        // If URL parsing fails, try to extract from the query directly
+        const domainMatch = searchQuery.match(/([a-zA-Z0-9-]+)\.(com|co\.za|net|org|io)/i);
+        if (domainMatch) {
+          processedQuery = domainMatch[1].charAt(0).toUpperCase() + domainMatch[1].slice(1);
+          progressCallback({ 
+            status: `Detected domain, searching for "${processedQuery}"...`, 
+            profilesFound: 0, 
+            profilesScraped: 0,
+            phase: 'maps_search'
+          });
+        }
+      }
+    } else {
+      progressCallback({ 
+        status: `Phase 1: Searching Google Maps for "${searchQuery}"...`, 
+        profilesFound: 0, 
+        profilesScraped: 0,
+        phase: 'maps_search'
+      });
+    }
+    
+    const searchUrl = `https://www.google.com/maps/search/${encodeURIComponent(processedQuery)}/@-26.0,28.0,7z`;
     
     await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await randomSleep(3000, 5000);
-    
     await page.waitForSelector('[role="feed"]', { timeout: 15000 }).catch(() => {});
-    await randomSleep(2000, 3000);
+    // Small delay to let map tiles load
+    await randomSleep(1000, 1500);
     
     progressCallback({ 
       status: 'Phase 1: Scrolling to collect business listings...', 
@@ -358,18 +411,35 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
     
     // Scroll to collect businesses
     let scrollAttempts = 0;
-    const maxScrolls = Math.min(20, Math.ceil(maxResults / 5));
+    // Increase max scrolls for larger result sets - allow more scrolling for 100+ results
+    const maxScrolls = Math.max(30, Math.ceil(maxResults / 3));
     let lastCount = 0;
     let noNewCount = 0;
+    // Increase threshold - allow more attempts before giving up (Google Maps can be slow to load)
+    const maxNoNewCount = 6;
     
-    while (scrollAttempts < maxScrolls && noNewCount < 3) {
+    console.log(`Starting scroll collection: maxResults=${maxResults}, maxScrolls=${maxScrolls}, maxNoNewCount=${maxNoNewCount}`);
+    
+    while (scrollAttempts < maxScrolls && noNewCount < maxNoNewCount) {
+      // Check for cancellation during scrolling
+      if (checkCancellation()) {
+        progressCallback({ 
+          status: 'Scraping cancelled by user', 
+          profilesFound: 0, 
+          profilesScraped: 0,
+          cancelled: true,
+          phase: 'maps_scroll'
+        });
+        break;
+      }
+      
       const currentCount = await page.evaluate(() => {
         const items = document.querySelectorAll('[role="feed"] > div > div > a[href*="/maps/place/"]');
         return items.length;
       });
       
       progressCallback({ 
-        status: `Phase 1: Found ${currentCount} businesses, scrolling for more...`, 
+        status: `Phase 1: Found ${currentCount} businesses (target: ${maxResults}), scrolling for more...`, 
         profilesFound: currentCount, 
         profilesScraped: 0,
         phase: 'maps_scroll'
@@ -377,21 +447,34 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
       
       if (currentCount === lastCount) {
         noNewCount++;
+        console.log(`No new businesses found (attempt ${noNewCount}/${maxNoNewCount}). Current count: ${currentCount}`);
       } else {
         noNewCount = 0;
         lastCount = currentCount;
+        console.log(`Found ${currentCount} businesses so far (target: ${maxResults})`);
       }
       
-      if (currentCount >= maxResults) break;
+      if (currentCount >= maxResults) {
+        console.log(`Reached target of ${maxResults} businesses (found ${currentCount}), stopping scroll`);
+        break;
+      }
       
+      // More aggressive scrolling - scroll both the feed and window
       await page.evaluate(() => {
         const feed = document.querySelector('[role="feed"]');
-        if (feed) feed.scrollTop = feed.scrollHeight;
+        if (feed) {
+          feed.scrollTop = feed.scrollHeight;
+          // Also try scrolling the window
+          window.scrollBy(0, 500);
+        }
       });
       
-      await randomSleep(2000, 3000);
+      // Longer delay to allow Google Maps to load more results
+      await randomSleep(2500, 3500);
       scrollAttempts++;
     }
+    
+    console.log(`Scroll collection complete: scrollAttempts=${scrollAttempts}/${maxScrolls}, noNewCount=${noNewCount}/${maxNoNewCount}`);
     
     // Get all business links
     const businessLinks = await page.evaluate(() => {
@@ -404,7 +487,43 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
     });
     
     const uniqueLinks = [...new Set(businessLinks)];
-    const linksToProcess = uniqueLinks.slice(0, maxResults);
+    let linksToProcess = uniqueLinks.slice(0, maxResults);
+    
+    // If no results found and query was a domain, try searching with the original domain
+    if (linksToProcess.length === 0 && isDomainOrUrl && processedQuery !== searchQuery) {
+      progressCallback({ 
+        status: `No results for "${processedQuery}", trying original domain "${searchQuery}"...`, 
+        profilesFound: 0, 
+        profilesScraped: 0,
+        phase: 'maps_search'
+      });
+      
+      // Try searching with the original domain
+      const fallbackUrl = `https://www.google.com/maps/search/${encodeURIComponent(searchQuery)}/@-26.0,28.0,7z`;
+      await page.goto(fallbackUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.waitForSelector('[role="feed"]', { timeout: 15000 }).catch(() => {});
+      // Small delay to let map tiles load
+      await randomSleep(1000, 1500);
+      
+      // Try to get links again
+      const fallbackLinks = await page.evaluate(() => {
+        const links = [];
+        const items = document.querySelectorAll('[role="feed"] > div > div > a[href*="/maps/place/"]');
+        items.forEach(item => {
+          if (item.href && !links.includes(item.href)) links.push(item.href);
+        });
+        return links;
+      });
+      
+      if (fallbackLinks.length > 0) {
+        linksToProcess = [...new Set(fallbackLinks)].slice(0, maxResults);
+        processedQuery = searchQuery; // Use original query for display
+      }
+    }
+    
+    if (linksToProcess.length === 0) {
+      throw new Error(`No businesses found on Google Maps for "${searchQuery}". Try searching with the company name or location instead of a domain/URL.`);
+    }
     
     progressCallback({ 
       status: `Phase 1: Extracting details from ${linksToProcess.length} businesses...`, 
@@ -417,6 +536,18 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
     const businessesData = [];
     
     for (let i = 0; i < linksToProcess.length; i++) {
+      // Check for cancellation before each business
+      if (checkCancellation()) {
+        progressCallback({ 
+          status: 'Scraping cancelled by user', 
+          profilesFound: linksToProcess.length, 
+          profilesScraped: scrapedBusinesses.length,
+          cancelled: true,
+          phase: 'maps_extract'
+        });
+        break;
+      }
+      
       progressCallback({ 
         status: `Phase 1: Getting Maps data ${i + 1}/${linksToProcess.length}...`, 
         profilesFound: linksToProcess.length, 
@@ -426,8 +557,8 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
       
       try {
         await page.goto(linksToProcess[i], { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await randomSleep(2000, 3500);
         await page.waitForSelector('h1', { timeout: 10000 }).catch(() => {});
+        await randomSleep(500, 800); // Small delay for page stability
         
         const businessData = await page.evaluate(() => {
           const getName = () => document.querySelector('h1')?.innerText?.trim() || '';
@@ -528,6 +659,9 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
         
         if (businessData.name) {
           businessesData.push(businessData);
+          console.log(`Collected Maps data for business ${i + 1}/${linksToProcess.length}: ${businessData.name}`);
+        } else {
+          console.log(`Warning: Business ${i + 1}/${linksToProcess.length} has no name, skipping`);
         }
       } catch (error) {
         console.log(`Error getting Maps data for business ${i + 1}: ${error.message}`);
@@ -536,7 +670,10 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
       await randomSleep(1000, 2000);
     }
     
+    console.log(`Phase 1 complete: Collected ${businessesData.length} businesses from Maps (requested ${linksToProcess.length})`);
+    
     // ========== PHASE 2: ENRICH WITH WEBSITE DATA ==========
+    console.log(`Phase 2: Starting enrichment for ${businessesData.length} businesses`);
     if (enableEnrichment && businessesData.length > 0) {
       progressCallback({ 
         status: `Phase 2: Enriching ${businessesData.length} businesses with website data...`, 
@@ -548,124 +685,174 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
       for (let i = 0; i < businessesData.length; i++) {
         const business = businessesData[i];
         
-        progressCallback({ 
-          status: `Phase 2: Enriching ${i + 1}/${businessesData.length} - ${business.name}...`, 
-          profilesFound: businessesData.length, 
-          profilesScraped: scrapedBusinesses.length,
-          phase: 'enrich',
-          currentBusiness: business.name
-        });
-        
-        // Get enriched data from website
-        let enrichedData = { emails: [], description: '', additionalPhones: [] };
-        
-        // If email found directly on Maps page, add it
-        if (business.emailFromMaps) {
-          enrichedData.emails.push(business.emailFromMaps);
-        }
-        
-        // Try to enrich from website if available
-        if (business.website) {
-          const websiteData = await enrichFromWebsite(page, business.website, business.name, progressCallback);
-          // Merge website emails with Maps page email
-          enrichedData.emails = [...enrichedData.emails, ...websiteData.emails];
-          enrichedData.description = websiteData.description || enrichedData.description;
-          enrichedData.additionalPhones = [...enrichedData.additionalPhones, ...websiteData.additionalPhones];
-        } else if (!enrichedData.emails.length) {
-          // No website listed AND no email found on Maps page
-          // Try to find website by checking common domain patterns (only if no emails found yet)
-          const potentialDomains = generatePotentialDomains(business.name);
+        try {
+          progressCallback({ 
+            status: `Phase 2: Enriching ${i + 1}/${businessesData.length} - ${business.name}...`, 
+            profilesFound: businessesData.length, 
+            profilesScraped: scrapedBusinesses.length,
+            phase: 'enrich',
+            currentBusiness: business.name
+          });
           
-          // Only try the most likely domain (.com)
-          if (potentialDomains.length > 0) {
-            try {
-              const testUrl = `https://${potentialDomains[0]}`;
-              // Quick check - shorter timeout
-              const response = await page.goto(testUrl, { waitUntil: 'domcontentloaded', timeout: 8000 }).catch(() => null);
-              
-              if (response && response.ok()) {
-                // Website exists! Extract emails (quick extraction only)
-                await randomSleep(1000, 1500);
-                const pageText = await page.evaluate(() => document.body.innerText || '');
-                const pageHtml = await page.evaluate(() => document.body.innerHTML || '');
-                const foundEmails = extractEmails(pageText, pageHtml);
-                const businessEmails = filterBusinessEmails(foundEmails);
-                enrichedData.emails = [...enrichedData.emails, ...businessEmails];
-              }
-            } catch (e) {
-              // Website doesn't exist or failed, continue
+          // Get enriched data from website
+          let enrichedData = { emails: [], description: '', additionalPhones: [] };
+          
+          try {
+            // If email found directly on Maps page, add it
+            if (business.emailFromMaps) {
+              enrichedData.emails.push(business.emailFromMaps);
             }
+            
+            // Try to enrich from website if available
+            if (business.website) {
+              try {
+                const websiteData = await enrichFromWebsite(page, business.website, business.name, progressCallback);
+                // Merge website emails with Maps page email
+                enrichedData.emails = [...enrichedData.emails, ...websiteData.emails];
+                enrichedData.description = websiteData.description || enrichedData.description;
+                enrichedData.additionalPhones = [...enrichedData.additionalPhones, ...websiteData.additionalPhones];
+              } catch (e) {
+                console.log(`Enrichment failed for ${business.name} website ${business.website}: ${e.message}`);
+                // Continue with Maps data only
+              }
+            } else if (!enrichedData.emails.length) {
+              // No website listed AND no email found on Maps page
+              // Try to find website by checking common domain patterns (only if no emails found yet)
+              const potentialDomains = generatePotentialDomains(business.name);
+              
+              // Only try the most likely domain (.com)
+              if (potentialDomains.length > 0) {
+                try {
+                  const testUrl = `https://${potentialDomains[0]}`;
+                  // Quick check - shorter timeout
+                  const response = await page.goto(testUrl, { waitUntil: 'domcontentloaded', timeout: 8000 }).catch(() => null);
+                  
+                  if (response && response.ok()) {
+                    // Website exists! Extract emails (quick extraction only)
+                    await randomSleep(500, 800); // Small delay for page content to load
+                    const pageText = await page.evaluate(() => document.body.innerText || '');
+                    const pageHtml = await page.evaluate(() => document.body.innerHTML || '');
+                    const foundEmails = extractEmails(pageText, pageHtml);
+                    const businessEmails = filterBusinessEmails(foundEmails);
+                    enrichedData.emails = [...enrichedData.emails, ...businessEmails];
+                  }
+                } catch (e) {
+                  // Website doesn't exist or failed, continue
+                }
+              }
+            }
+          } catch (e) {
+            console.log(`Error during enrichment for ${business.name}: ${e.message}`);
+            // Continue with Maps data only
           }
+          
+          // Remove duplicates and filter to business emails only
+          enrichedData.emails = filterBusinessEmails([...new Set(enrichedData.emails.map(e => e.toLowerCase()))]);
+          
+          // Combine Google Maps data with website data
+          const phone = cleanPhoneNumber(business.phone);
+          const isMobile = isMobileNumber(phone);
+          
+          // Get best email (prefer business email) - use centralized function
+          const primaryEmail = getBestEmail(enrichedData.emails) || null;
+          
+          // Combine description from Maps category + website
+          let description = enrichedData.description || '';
+          if (business.category && !description.includes(business.category)) {
+            description = business.category + (description ? '. ' + description : '');
+          }
+          
+          const completeRecord = {
+            company: truncateField(business.name, 100),
+            first_name: truncateField(business.name, 100),
+            last_name: '',
+            email: primaryEmail,
+            phone_number: !isMobile ? phone : null,
+            whatsapp_number: isMobile ? phone : null,
+            mobile_number: isMobile ? phone : null,
+            location: truncateField(business.address, 100),
+            company_website: business.website || null,
+            company_summary: description.slice(0, 500) || null,
+            job_title: null,
+            email_domain: primaryEmail ? truncateField(primaryEmail.split('@')[1], 100) : null,
+            source: 'google_maps',
+            email_verified: false,
+            verification_status: primaryEmail ? 'unverified' : 'no_email',
+            industry: truncateField(industry || business.category, 100),
+            keywords: truncateField(keywords, 100),
+            search_query: truncateField(searchQuery, 200) // Store original search query
+          };
+          
+          scrapedBusinesses.push(completeRecord);
+          console.log(`Added business ${i + 1}/${businessesData.length}: ${business.name} (Total: ${scrapedBusinesses.length})`);
+          console.log(`  - search_query: "${completeRecord.search_query}"`);
+          
+        } catch (error) {
+          // Even if enrichment completely fails, add the business with Maps data only
+          console.log(`Error processing business ${i + 1} (${business.name}): ${error.message}. Adding with Maps data only.`);
+          
+          const phone = cleanPhoneNumber(business.phone);
+          const isMobile = isMobileNumber(phone);
+          
+          scrapedBusinesses.push({
+            company: truncateField(business.name, 100),
+            first_name: truncateField(business.name, 100),
+            last_name: '',
+            email: business.emailFromMaps || null,
+            phone_number: !isMobile ? phone : null,
+            whatsapp_number: isMobile ? phone : null,
+            mobile_number: isMobile ? phone : null,
+            location: truncateField(business.address, 100),
+            company_website: business.website || null,
+            company_summary: truncateField(business.category, 100),
+            job_title: null,
+            email_domain: business.emailFromMaps ? truncateField(business.emailFromMaps.split('@')[1], 100) : null,
+            source: 'google_maps',
+            email_verified: false,
+            verification_status: business.emailFromMaps ? 'unverified' : 'no_email',
+            industry: truncateField(industry || business.category, 100),
+            keywords: truncateField(keywords, 100),
+            search_query: truncateField(searchQuery, 200) // Store original search query
+          });
+          console.log(`Added business ${i + 1}/${businessesData.length} (fallback): ${business.name} (Total: ${scrapedBusinesses.length})`);
         }
         
-        // Remove duplicates and filter to business emails only
-        enrichedData.emails = filterBusinessEmails([...new Set(enrichedData.emails.map(e => e.toLowerCase()))]);
-        
-        // Combine Google Maps data with website data
-        const phone = cleanPhoneNumber(business.phone);
-        const isMobile = isMobileNumber(phone);
-        
-        // Get best email (prefer business email) - use centralized function
-        const primaryEmail = getBestEmail(enrichedData.emails) || null;
-        
-        // Combine description from Maps category + website
-        let description = enrichedData.description || '';
-        if (business.category && !description.includes(business.category)) {
-          description = business.category + (description ? '. ' + description : '');
-        }
-        
-        const completeRecord = {
-          company: business.name,
-          first_name: business.name,
-          last_name: '',
-          email: primaryEmail,
-          phone_number: !isMobile ? phone : null,
-          whatsapp_number: isMobile ? phone : null,
-          mobile_number: isMobile ? phone : null,
-          location: business.address || null,
-          company_website: business.website || null,
-          company_summary: description.slice(0, 500) || null,
-          job_title: null,
-          email_domain: primaryEmail ? primaryEmail.split('@')[1] : null,
-          source: 'google_maps',
-          email_verified: false,
-          verification_status: primaryEmail ? 'unverified' : 'no_email',
-          industry: industry || business.category || null,
-          keywords: keywords || null
-        };
-        
-        scrapedBusinesses.push(completeRecord);
-        
-        // Small delay between enrichments
-        await randomSleep(1000, 2000);
+        // Reduced delay between enrichments
+        await randomSleep(400, 700);
       }
+      console.log(`Phase 2: Enrichment complete. Total businesses in scrapedBusinesses: ${scrapedBusinesses.length}`);
     } else {
       // No enrichment - just process Maps data
+      console.log(`Phase 2: Enrichment disabled. Processing ${businessesData.length} businesses without enrichment.`);
       for (const business of businessesData) {
         const phone = cleanPhoneNumber(business.phone);
         const isMobile = isMobileNumber(phone);
         
         scrapedBusinesses.push({
-          company: business.name,
-          first_name: business.name,
+          company: truncateField(business.name, 100),
+          first_name: truncateField(business.name, 100),
           last_name: '',
           email: null,
           phone_number: !isMobile ? phone : null,
           whatsapp_number: isMobile ? phone : null,
           mobile_number: isMobile ? phone : null,
-          location: business.address || null,
+          location: truncateField(business.address, 100),
           company_website: business.website || null,
-          company_summary: business.category || null,
+          company_summary: truncateField(business.category, 100),
           job_title: null,
           email_domain: null,
           source: 'google_maps',
           email_verified: false,
           verification_status: 'no_email',
-          industry: industry || business.category || null,
-          keywords: keywords || null
+          industry: truncateField(industry || business.category, 100),
+          keywords: truncateField(keywords, 100),
+          search_query: truncateField(searchQuery, 200) // Store original search query
         });
       }
+      console.log(`Phase 2: No enrichment. Total businesses in scrapedBusinesses: ${scrapedBusinesses.length}`);
     }
+    
+    console.log(`Before Phase 3: scrapedBusinesses.length = ${scrapedBusinesses.length}, businessesData.length = ${businessesData.length}`);
     
     // ========== PHASE 3: SAVE TO DATABASE ==========
     if (scrapedBusinesses.length > 0) {
@@ -676,21 +863,50 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
         phase: 'save'
       });
       
-      // Remove duplicates by company name
-      const uniqueBusinesses = [...new Map(scrapedBusinesses.map(b => [b.company, b])).values()];
+      // Remove duplicates by company name first
+      const uniqueByCompany = [...new Map(scrapedBusinesses.map(b => [b.company, b])).values()];
+      
+      // Then remove duplicates by email (for upsert operations)
+      // Keep the first occurrence of each email
+      const seenEmails = new Set();
+      const uniqueByEmail = [];
+      const duplicatesByEmail = [];
+      
+      for (const business of uniqueByCompany) {
+        if (business.email) {
+          const emailLower = business.email.toLowerCase();
+          if (seenEmails.has(emailLower)) {
+            duplicatesByEmail.push(business);
+          } else {
+            seenEmails.add(emailLower);
+            uniqueByEmail.push(business);
+          }
+        } else {
+          uniqueByEmail.push(business);
+        }
+      }
+      
+      console.log(`Deduplication: ${scrapedBusinesses.length} total -> ${uniqueByCompany.length} by company -> ${uniqueByEmail.length} by email (${duplicatesByEmail.length} duplicates removed)`);
       
       // Separate records with emails (can upsert) from those without (must insert)
-      const withEmail = uniqueBusinesses.filter(b => b.email);
-      const withoutEmail = uniqueBusinesses.filter(b => !b.email);
+      const withEmail = uniqueByEmail.filter(b => b.email);
+      const withoutEmail = uniqueByEmail.filter(b => !b.email);
       
       // Upsert records with email
       if (withEmail.length > 0) {
+        // Debug: Log first record to verify search_query is included
+        if (withEmail.length > 0) {
+          console.log(`Saving ${withEmail.length} contacts with email. First record search_query: "${withEmail[0].search_query}"`);
+        }
+        
         const { error: upsertError } = await supabase
           .from('contacts')
           .upsert(withEmail, { onConflict: 'email' });
         
         if (upsertError) {
           console.error('Supabase upsert error:', upsertError);
+        } else {
+          console.log(`Successfully upserted ${withEmail.length} contacts with search_query field`);
         }
       }
       
@@ -705,15 +921,17 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
         }
       }
       
-      console.log(`Successfully saved ${uniqueBusinesses.length} businesses (${withEmail.length} with emails)`);
+      console.log(`Successfully saved ${uniqueByEmail.length} businesses (${withEmail.length} with emails)`);
     }
     
     // Calculate stats
     const emailCount = scrapedBusinesses.filter(b => b.email).length;
     const phoneCount = scrapedBusinesses.filter(b => b.phone_number || b.mobile_number).length;
     
+    console.log(`Final count before return: scrapedBusinesses.length = ${scrapedBusinesses.length}`);
+    
     progressCallback({ 
-      status: `Complete! ${scrapedBusinesses.length} businesses saved. ${emailCount} with emails, ${phoneCount} with phones.`, 
+      status: `Complete! Found and saved ${scrapedBusinesses.length} businesses. ${emailCount} with emails, ${phoneCount} with phones.`, 
       profilesFound: linksToProcess.length, 
       profilesScraped: scrapedBusinesses.length,
       phase: 'complete',
@@ -725,9 +943,11 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
       }
     });
     
-    await randomSleep(2000, 3000);
+    await randomSleep(500, 1000); // Reduced final delay
     await browser.close();
     
+    console.log(`✓ Google Maps scraper returning ${scrapedBusinesses.length} businesses to main process`);
+    console.log(`Business names: ${scrapedBusinesses.map(b => b.company || b.first_name || 'Unknown').join(', ')}`);
     return scrapedBusinesses;
     
   } catch (error) {

@@ -77,7 +77,30 @@ ipcMain.on('open-scraper', () => {
 // SCRAPING - Enhanced with enrichment & bulk support
 // ============================================
 
+// Global cancellation flag for scraping operations
+let scrapingCancelled = false;
+
+// Reset cancellation flag when starting a new scrape
+function resetCancellationFlag() {
+  scrapingCancelled = false;
+}
+
+// Check if scraping should be cancelled
+function isScrapingCancelled() {
+  return scrapingCancelled;
+}
+
+// Export cancellation check for use in scrapers (via require)
+global.isScrapingCancelled = isScrapingCancelled;
+
+ipcMain.handle('stop-scrape', async (event) => {
+  scrapingCancelled = true;
+  console.log('Scraping cancellation requested');
+  return { success: true, message: 'Scraping will stop after current operation' };
+});
+
 ipcMain.handle('start-scrape', async (event, config) => {
+  resetCancellationFlag();
   try {
     let results;
     let stats = null;
@@ -85,6 +108,12 @@ ipcMain.handle('start-scrape', async (event, config) => {
     
     // Progress callback helper - captures stats and failed URLs
     const progressCallback = (progress) => {
+      // Check if cancellation was requested
+      if (isScrapingCancelled()) {
+        progress.status = 'Stopping...';
+        progress.cancelled = true;
+      }
+      
       if (scraperWindow) {
         scraperWindow.webContents.send('scrape-progress', progress);
       }
@@ -94,41 +123,78 @@ ipcMain.handle('start-scrape', async (event, config) => {
       if (progress.failedUrls) {
         failedUrls = progress.failedUrls;
       }
+      // Don't overwrite results from progress callback - use direct return value instead
+      // if (progress.results) {
+      //   results = progress.results;
+      // }
     };
     
     if (config.type === 'linkedin') {
       const { runLinkedInScraper } = require('./src/scraper');
+      const searchMode = config.searchMode || 'company';
+      
+      // Wrap progress callback to include cancellation check
+      const progressWithCancellation = (progress) => {
+        if (isScrapingCancelled()) {
+          progress.cancelled = true;
+          progress.status = 'Stopping...';
+        }
+        progressCallback(progress);
+      };
+      
       results = await runLinkedInScraper(
-        config.companyName,
-        config.companyDomain,
+        config.companyName || '',
+        config.companyDomain || '',
         config.maxProfiles,
         config.jobTitles,
         config.industry || null,
         config.keywords || null,
-        progressCallback
+        progressWithCancellation,
+        searchMode,
+        isScrapingCancelled, // Pass cancellation check function
+        config.location || null // Pass location
       );
     } else if (config.type === 'googlemaps') {
-  const { runGoogleMapsScraper } = require('./src/googlemaps-scraper');
-  
-  // Build options object for enhanced scraper
-  const options = {
-    enableEnrichment: config.enableEnrichment !== false
-  };
-  
-  results = await runGoogleMapsScraper(
-    config.searchQuery,
-    config.maxResults,
-    config.industry || null,
-    config.keywords || null,
-    (progress) => {
-      if (scraperWindow) {
-        scraperWindow.webContents.send('scrape-progress', progress);
-      }
-    },
-    options  // ✅ Pass the options!
-  );
+      const { runGoogleMapsScraper } = require('./src/googlemaps-scraper');
+      
+      // Build options object for enhanced scraper
+      const options = {
+        enableEnrichment: config.enableEnrichment !== false,
+        checkCancellation: isScrapingCancelled // Pass cancellation check
+      };
+      
+      // Wrap progress callback to include cancellation check
+      const progressWithCancellation = (progress) => {
+        if (isScrapingCancelled()) {
+          progress.cancelled = true;
+          progress.status = 'Stopping...';
+        }
+        if (scraperWindow) {
+          scraperWindow.webContents.send('scrape-progress', progress);
+        }
+      };
+      
+      results = await runGoogleMapsScraper(
+        config.searchQuery,
+        config.maxResults,
+        config.industry || null,
+        config.keywords || null,
+        progressWithCancellation,
+        options
+      );
+      
+      console.log(`Google Maps scraper returned ${results ? results.length : 0} results`);
 } else if (config.type === 'website') {
       const { runWebsiteScraper, runBulkWebsiteScraper } = require('./src/website-scraper');
+      
+      // Wrap progress callback to include cancellation check
+      const progressWithCancellation = (progress) => {
+        if (isScrapingCancelled()) {
+          progress.cancelled = true;
+          progress.status = 'Stopping...';
+        }
+        progressCallback(progress);
+      };
       
       // Check if bulk or single website scrape
       if (config.isBulk || (typeof config.websiteUrl === 'string' && 
@@ -138,7 +204,8 @@ ipcMain.handle('start-scrape', async (event, config) => {
           config.websiteUrl,
           config.industry || null,
           config.keywords || null,
-          progressCallback
+          progressWithCancellation,
+          { checkCancellation: isScrapingCancelled } // Pass cancellation check
         );
       } else {
         // Use single website scraper
@@ -146,9 +213,25 @@ ipcMain.handle('start-scrape', async (event, config) => {
           config.websiteUrl,
           config.industry || null,
           config.keywords || null,
-          progressCallback
+          progressWithCancellation,
+          { checkCancellation: isScrapingCancelled } // Pass cancellation check
         );
       }
+    }
+    
+    // Check for cancellation
+    if (isScrapingCancelled()) {
+      if (mainWindow) {
+        mainWindow.webContents.send('refresh-data');
+      }
+      return {
+        success: false,
+        error: 'Scraping was cancelled by user',
+        cancelled: true,
+        stats: stats,
+        failedUrls: failedUrls,
+        results: results || []
+      };
     }
     
     if (mainWindow) {
@@ -164,9 +247,14 @@ ipcMain.handle('start-scrape', async (event, config) => {
       };
     }
     
+    // Ensure results is an array
+    const finalResults = Array.isArray(results) ? results : (results ? [results] : []);
+    
+    console.log(`Returning ${finalResults.length} results to frontend (stats: ${stats ? stats.total : 'N/A'})`);
+    
     return { 
       success: true, 
-      results,
+      results: finalResults,
       stats,
       failedUrls
     };
@@ -180,6 +268,8 @@ ipcMain.handle('start-scrape', async (event, config) => {
 // ============================================
 
 ipcMain.handle('start-email-scrape', async (event, config) => {
+  // IMPORTANT: ensure a previous "stop" doesn't auto-cancel new runs
+  resetCancellationFlag();
   try {
     const { runUnifiedEmailScraper } = require('./src/email-scraper-service');
     
@@ -189,6 +279,12 @@ ipcMain.handle('start-email-scrape', async (event, config) => {
     
     // Progress callback helper
     const progressCallback = (progress) => {
+      // Check if cancellation was requested
+      if (isScrapingCancelled()) {
+        progress.status = 'Stopping...';
+        progress.cancelled = true;
+      }
+      
       if (scraperWindow) {
         scraperWindow.webContents.send('scrape-progress', progress);
       }
@@ -217,8 +313,26 @@ ipcMain.handle('start-email-scrape', async (event, config) => {
         industry: config.industry || null,
         keywords: config.keywords || null
       },
-      progressCallback
+      progressCallback,
+      isScrapingCancelled // Pass cancellation check function
     );
+    
+    // Check for cancellation
+    if (isScrapingCancelled()) {
+      if (mainWindow) {
+        mainWindow.webContents.send('refresh-data');
+      }
+      const finalResults = result?.results || results || [];
+      const finalStats = result?.stats || stats || { total: 0, withEmail: 0, withPhone: 0 };
+      return {
+        success: false,
+        error: 'Scraping was cancelled by user',
+        cancelled: true,
+        results: finalResults,
+        stats: finalStats,
+        errors: result?.errors || errors
+      };
+    }
     
     if (mainWindow) {
       mainWindow.webContents.send('refresh-data');
@@ -246,9 +360,54 @@ ipcMain.handle('start-email-scrape', async (event, config) => {
   }
 });
 
+// Check and create search_query column if needed
+async function ensureSearchQueryColumn() {
+  try {
+    const supabase = getSupabase();
+    
+    // Try to query the search_query column - if it fails, column doesn't exist
+    const { error } = await supabase
+      .from('contacts')
+      .select('search_query')
+      .limit(1);
+    
+    if (error && error.code === '42703') { // Column doesn't exist error code
+      console.log('search_query column does not exist. Attempting to create it...');
+      
+      // Try to create column using RPC (requires a database function)
+      // If RPC doesn't exist, we'll need to use direct SQL
+      const { error: rpcError } = await supabase.rpc('add_search_query_column');
+      
+      if (rpcError) {
+        console.warn('Could not create column automatically. Please run the SQL migration manually.');
+        console.warn('SQL to run:', `
+ALTER TABLE contacts ADD COLUMN IF NOT EXISTS search_query VARCHAR(200);
+        `.trim());
+        return { success: false, needsManualMigration: true };
+      }
+      
+      console.log('search_query column created successfully!');
+      return { success: true };
+    }
+    
+    // Column exists or different error
+    if (error && error.code !== '42703') {
+      console.warn('Error checking search_query column:', error.message);
+    }
+    
+    return { success: true, columnExists: true };
+  } catch (error) {
+    console.warn('Error checking search_query column:', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
 // Load contacts
 ipcMain.handle('load-contacts', async () => {
   try {
+    // Check for search_query column on first load
+    await ensureSearchQueryColumn();
+    
     const supabase = getSupabase();
     
     const { data, error } = await supabase
@@ -439,15 +598,37 @@ ipcMain.handle('verify-emails', async (event, emailData, apiKey) => {
     
     console.log(`Starting bulk verification of ${emailData.length} emails`);
     
+    let quotaReached = false;
+    let quotaReachedAt = null;
+    
     for (let i = 0; i < emailData.length; i++) {
       const item = emailData[i];
+      
+      // Stop processing if quota was reached
+      if (quotaReached) {
+        console.log(`Quota reached - stopping verification. ${emailData.length - i} emails remaining.`);
+        // Mark remaining emails as quota_exceeded
+        for (let j = i; j < emailData.length; j++) {
+          results.push({ 
+            id: emailData[j].id, 
+            verified: null, 
+            status: 'quota_exceeded',
+            details: {
+              error: 'API quota exceeded. Verification stopped early.',
+              code: 'quota_reached'
+            }
+          });
+        }
+        break;
+      }
       
       // Send progress update to renderer
       if (mainWindow) {
         mainWindow.webContents.send('verification-progress', {
           current: i + 1,
           total: emailData.length,
-          email: item.email
+          email: item.email,
+          quotaReached: quotaReached
         });
       }
       
@@ -458,6 +639,23 @@ ipcMain.handle('verify-emails', async (event, emailData, apiKey) => {
 
       try {
         const verifyResult = await verifyEmailWithAPI(item.email, apiKey);
+        
+        // Check if quota was reached
+        if (verifyResult.status === 'quota_exceeded') {
+          quotaReached = true;
+          quotaReachedAt = i + 1;
+          console.error('⚠️ API QUOTA EXCEEDED - Stopping verification');
+          
+          // Send quota error notification to renderer
+          if (mainWindow) {
+            mainWindow.webContents.send('quota-exceeded', {
+              message: 'Abstract Email Reputation API quota has been exhausted.',
+              verifiedCount: results.filter(r => r.verified).length,
+              totalAttempted: i + 1,
+              remaining: emailData.length - (i + 1)
+            });
+          }
+        }
         
         // Update in Supabase
         // Only update if not quota exceeded (don't overwrite existing status)
@@ -470,13 +668,13 @@ ipcMain.handle('verify-emails', async (event, emailData, apiKey) => {
               verification_details: verifyResult.details
             })
             .eq('id', item.id);
+
+          if (error) {
+            console.error('Supabase update error:', error);
+          }
         } else {
           // For quota exceeded, just log it
           console.log(`Quota exceeded for ${item.email} - skipping database update`);
-        }
-
-        if (error) {
-          console.error('Supabase update error:', error);
         }
 
         // Handle quota exceeded specially
@@ -497,21 +695,35 @@ ipcMain.handle('verify-emails', async (event, emailData, apiKey) => {
         }
 
         // Rate limiting - wait 1.1 seconds between API calls (free tier limit)
-        await new Promise(resolve => setTimeout(resolve, 1100));
+        // Skip delay if quota reached (we're stopping anyway)
+        if (!quotaReached) {
+          await new Promise(resolve => setTimeout(resolve, 1100));
+        }
 
       } catch (err) {
         console.error('Verification error for', item.email, err);
         results.push({ id: item.id, verified: false, status: 'error' });
       }
     }
+    
+    // Add quota reached info to return value
+    if (quotaReached) {
+      console.log(`⚠️ Verification stopped early due to quota: ${quotaReachedAt}/${emailData.length} emails processed`);
+    }
 
     const verifiedCount = results.filter(r => r.verified).length;
     const riskyCount = results.filter(r => r.status === 'risky').length;
     const invalidCount = results.filter(r => r.status === 'invalid').length;
+    const quotaExceededCount = results.filter(r => r.status === 'quota_exceeded').length;
     
-    console.log(`Verification complete: ${verifiedCount} verified, ${riskyCount} risky, ${invalidCount} invalid`);
+    console.log(`Verification complete: ${verifiedCount} verified, ${riskyCount} risky, ${invalidCount} invalid, ${quotaExceededCount} quota exceeded`);
 
-    return { success: true, results };
+    return { 
+      success: true, 
+      results,
+      quotaExceeded: quotaReached,
+      quotaExceededCount: quotaExceededCount
+    };
   } catch (error) {
     console.error('Bulk verification error:', error);
     return { success: false, error: error.message };

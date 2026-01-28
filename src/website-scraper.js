@@ -1,5 +1,9 @@
 const { launchBrowser } = require('./browser-helper');
 const { createClient } = require('@supabase/supabase-js');
+const { extractEmails, filterBusinessEmails, getBestEmail } = require('./email-extractor');
+const https = require('https');
+const http = require('http');
+const { parseString } = require('xml2js');
 
 const SUPABASE_URL = 'https://cvecdppmqcxgofetrfir.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN2ZWNkcHBtcWN4Z29mZXRyZmlyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc1ODQ3NDYsImV4cCI6MjA4MzE2MDc0Nn0.GjF5fvkdeDo8kjso3RxQTVEroMO6-hideVgPAYWDyvc';
@@ -9,6 +13,144 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 function randomSleep(min = 1000, max = 3000) {
   const ms = Math.floor(Math.random() * (max - min + 1)) + min;
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Helper function to truncate strings to database column limits
+function truncateField(value, maxLength = 100) {
+  if (!value || typeof value !== 'string') return value;
+  return value.length > maxLength ? value.substring(0, maxLength) : value;
+}
+
+/**
+ * Fetch and parse sitemap XML
+ * @param {string} sitemapUrl - URL to sitemap
+ * @returns {Promise<Array<string>>} - Array of URLs from sitemap
+ */
+function fetchSitemap(sitemapUrl) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(sitemapUrl);
+    const client = url.protocol === 'https:' ? https : http;
+    
+    client.get(sitemapUrl, (res) => {
+      let data = '';
+      
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      
+      res.on('end', () => {
+        try {
+          parseString(data, (err, result) => {
+            if (err) {
+              reject(err);
+              return;
+            }
+            
+            const urls = [];
+            
+            // Handle sitemap index (contains multiple sitemaps)
+            if (result.sitemapindex && result.sitemapindex.sitemap) {
+              const sitemaps = result.sitemapindex.sitemap.map(s => s.loc[0]);
+              // For now, just return the first sitemap URL (can be enhanced to fetch all)
+              resolve(sitemaps);
+              return;
+            }
+            
+            // Handle regular sitemap (contains URLs)
+            if (result.urlset && result.urlset.url) {
+              result.urlset.url.forEach(urlEntry => {
+                if (urlEntry.loc && urlEntry.loc[0]) {
+                  urls.push(urlEntry.loc[0]);
+                }
+              });
+            }
+            
+            resolve(urls);
+          });
+        } catch (error) {
+          reject(error);
+        }
+      });
+    }).on('error', (err) => {
+      reject(err);
+    });
+  });
+}
+
+/**
+ * Find sitemap URL for a website
+ * @param {string} baseUrl - Base website URL
+ * @returns {Promise<string|null>} - Sitemap URL or null if not found
+ */
+async function findSitemap(baseUrl) {
+  const commonSitemapPaths = [
+    '/sitemap.xml',
+    '/sitemap_index.xml',
+    '/sitemap-index.xml',
+    '/sitemap1.xml',
+    '/sitemap_1.xml',
+    '/sitemap.txt'
+  ];
+  
+  try {
+    const url = new URL(baseUrl);
+    const base = `${url.protocol}//${url.host}`;
+    
+    // Try common sitemap locations
+    for (const path of commonSitemapPaths) {
+      try {
+        const sitemapUrl = base + path;
+        const response = await new Promise((resolve, reject) => {
+          const client = url.protocol === 'https:' ? https : http;
+          const req = client.get(sitemapUrl, (res) => {
+            if (res.statusCode === 200) {
+              resolve(sitemapUrl);
+            } else {
+              reject(new Error(`Status ${res.statusCode}`));
+            }
+          });
+          req.on('error', reject);
+          req.setTimeout(5000, () => {
+            req.destroy();
+            reject(new Error('Timeout'));
+          });
+        });
+        
+        return response;
+      } catch (e) {
+        // Continue to next path
+      }
+    }
+    
+    // Try robots.txt for sitemap reference
+    try {
+      const robotsUrl = base + '/robots.txt';
+      const robotsContent = await new Promise((resolve, reject) => {
+        const client = url.protocol === 'https:' ? https : http;
+        const req = client.get(robotsUrl, (res) => {
+          let data = '';
+          res.on('data', chunk => data += chunk);
+          res.on('end', () => resolve(data));
+        });
+        req.on('error', reject);
+        req.setTimeout(5000, () => {
+          req.destroy();
+          reject(new Error('Timeout'));
+        });
+      });
+      
+      const sitemapMatch = robotsContent.match(/Sitemap:\s*(.+)/i);
+      if (sitemapMatch && sitemapMatch[1]) {
+        return sitemapMatch[1].trim();
+      }
+    } catch (e) {
+      // robots.txt not found or error
+    }
+    
+    return null;
+  } catch (error) {
+    return null;
+  }
 }
 
 function extractPhoneNumbers(text) {
@@ -38,46 +180,7 @@ function extractPhoneNumbers(text) {
   return [...new Set(cleaned)];
 }
 
-function extractEmails(text, html = '') {
-  if (!text && !html) return [];
-  
-  const combinedText = text + ' ' + html;
-  const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
-  const matches = combinedText.match(emailRegex) || [];
-  
-  const blacklist = [
-    'example.com', 'domain.com', 'email.com', 'test.com',
-    'sentry.io', 'w3.org', 'schema.org', 'wixpress.com',
-    'google.com', 'gstatic.com', 'googleapis.com',
-    'cloudflare.com', 'wp.com', 'wordpress.com',
-    '.png', '.jpg', '.gif', '.svg', '.css', '.js',
-    'noreply', 'no-reply', 'unsubscribe', 'mailer-daemon'
-  ];
-  
-  const validEmails = matches.filter(email => {
-    const lower = email.toLowerCase();
-    if (blacklist.some(bl => lower.includes(bl))) return false;
-    if (email.length > 60 || email.length < 6) return false;
-    const domain = email.split('@')[1];
-    if (!domain || !domain.includes('.')) return false;
-    const ext = domain.split('.').pop();
-    if (ext.length < 2 || ext.length > 10) return false;
-    return true;
-  });
-  
-  const unique = [...new Set(validEmails.map(e => e.toLowerCase()))];
-  const personalDomains = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'live.com', 'icloud.com'];
-  
-  unique.sort((a, b) => {
-    const aPersonal = personalDomains.some(d => a.includes(d));
-    const bPersonal = personalDomains.some(d => b.includes(d));
-    if (aPersonal && !bPersonal) return 1;
-    if (!aPersonal && bPersonal) return -1;
-    return 0;
-  });
-  
-  return unique;
-}
+// Email extraction now uses centralized email-extractor module (imported above)
 
 function categorizePhoneNumbers(phones) {
   const landlines = [];
@@ -142,13 +245,54 @@ function normalizeUrl(url) {
  * @returns {Object|null} - Scraped data or null if failed
  */
 async function scrapeSingleWebsite(page, websiteUrl, options = {}) {
-  const { industry, keywords } = options;
+  const { industry, keywords, maxPages = 50, useSitemap = true, checkCancellation = null } = options;
   
   try {
     const url = normalizeUrl(websiteUrl);
     if (!url) {
       console.log(`Invalid URL: ${websiteUrl}`);
       return null;
+    }
+    
+    // Collect all URLs to scrape
+    let urlsToScrape = [url]; // Always include homepage
+    
+    // Try to find and parse sitemap
+    if (useSitemap) {
+      try {
+        console.log(`Looking for sitemap for ${url}...`);
+        const sitemapUrl = await findSitemap(url);
+        
+        if (sitemapUrl) {
+          console.log(`Found sitemap: ${sitemapUrl}`);
+          const sitemapUrls = await fetchSitemap(sitemapUrl);
+          
+          // Filter URLs to same domain and limit count
+          const baseDomain = new URL(url).hostname;
+          const filteredUrls = sitemapUrls
+            .filter(sitemapUrl => {
+              try {
+                const sitemapDomain = new URL(sitemapUrl).hostname;
+                return sitemapDomain === baseDomain || sitemapDomain.replace('www.', '') === baseDomain.replace('www.', '');
+              } catch (e) {
+                return false;
+              }
+            })
+            .slice(0, maxPages - 1); // -1 because we already have homepage
+          
+          urlsToScrape = [url, ...filteredUrls];
+          console.log(`Will scrape ${urlsToScrape.length} pages from sitemap`);
+        } else {
+          console.log(`No sitemap found for ${url}, using homepage + contact/about pages`);
+        }
+      } catch (error) {
+        console.log(`Sitemap error for ${url}: ${error.message}, falling back to homepage + contact/about`);
+      }
+    }
+    
+    // Limit total pages
+    if (urlsToScrape.length > maxPages) {
+      urlsToScrape = urlsToScrape.slice(0, maxPages);
     }
     
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -249,93 +393,143 @@ async function scrapeSingleWebsite(page, websiteUrl, options = {}) {
       return '';
     });
     
-    // Collect text from homepage
+    // Collect text from all pages
     let allText = await page.evaluate(() => document.body.innerText || '');
     let allHtml = await page.evaluate(() => document.body.innerHTML || '');
     let companyDescription = metaDescription || '';
     
-    // Find contact and about page links
-    const links = await page.evaluate(() => {
-      const allLinks = Array.from(document.querySelectorAll('a'));
-      const contactLinks = [];
-      const aboutLinks = [];
+    // If we have sitemap URLs, visit each one
+    if (urlsToScrape.length > 1) {
+      console.log(`Scraping ${urlsToScrape.length} pages from sitemap...`);
       
-      allLinks.forEach(link => {
-        const href = (link.href || '').toLowerCase();
-        const text = (link.innerText || '').toLowerCase();
-        
-        if (href.includes('contact') || text.includes('contact') ||
-            href.includes('get-in-touch') || text.includes('get in touch')) {
-          if (link.href) contactLinks.push(link.href);
+      for (let i = 1; i < urlsToScrape.length; i++) { // Start from 1 (skip homepage, already done)
+        // Check for cancellation before each page
+        if (checkCancellation()) {
+          progressCallback({ 
+            status: 'Scraping cancelled by user', 
+            cancelled: true
+          });
+          break;
         }
-        if (href.includes('about') || text.includes('about us') || text === 'about') {
-          if (link.href) aboutLinks.push(link.href);
-        }
-      });
-      
-      return { 
-        contactLinks: [...new Set(contactLinks)].slice(0, 2), 
-        aboutLinks: [...new Set(aboutLinks)].slice(0, 2) 
-      };
-    });
-    
-    // Visit contact page
-    if (links.contactLinks.length > 0) {
-      try {
-        await page.goto(links.contactLinks[0], { waitUntil: 'domcontentloaded', timeout: 20000 });
-        await randomSleep(1500, 2500);
         
-        const contactText = await page.evaluate(() => document.body.innerText || '');
-        const contactHtml = await page.evaluate(() => document.body.innerHTML || '');
-        allText += '\n' + contactText;
-        allHtml += '\n' + contactHtml;
-      } catch (e) {
-        console.log(`Contact page error for ${companyName}: ${e.message}`);
+        const pageUrl = urlsToScrape[i];
+        
+        try {
+          await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+          await randomSleep(1500, 2500);
+          
+          const pageText = await page.evaluate(() => document.body.innerText || '');
+          const pageHtml = await page.evaluate(() => document.body.innerHTML || '');
+          allText += '\n' + pageText;
+          allHtml += '\n' + pageHtml;
+          
+          // Update description if we find a better one
+          const pageDescription = await page.evaluate(() => {
+            const metaDesc = document.querySelector('meta[name="description"]');
+            if (metaDesc?.content) return metaDesc.content;
+            
+            const paragraphs = Array.from(document.querySelectorAll('p'));
+            const longParagraphs = paragraphs
+              .map(p => p.innerText?.trim())
+              .filter(text => text && text.length > 100)
+              .slice(0, 3);
+            return longParagraphs.join('\n');
+          });
+          
+          if (pageDescription && pageDescription.length > companyDescription.length) {
+            companyDescription = pageDescription;
+          }
+          
+          // Progress update every 10 pages
+          if (i % 10 === 0) {
+            console.log(`Scraped ${i}/${urlsToScrape.length - 1} pages...`);
+          }
+        } catch (e) {
+          console.log(`Error scraping page ${pageUrl}: ${e.message}`);
+          // Continue with next page
+        }
       }
-    }
-    
-    // Visit about page for better description
-    if (links.aboutLinks.length > 0) {
-      try {
-        await page.goto(links.aboutLinks[0], { waitUntil: 'domcontentloaded', timeout: 20000 });
-        await randomSleep(1500, 2500);
+    } else {
+      // Fallback: Find contact and about page links if no sitemap
+      const links = await page.evaluate(() => {
+        const allLinks = Array.from(document.querySelectorAll('a'));
+        const contactLinks = [];
+        const aboutLinks = [];
         
-        const aboutText = await page.evaluate(() => {
-          const paragraphs = Array.from(document.querySelectorAll('p'));
-          const longParagraphs = paragraphs
-            .map(p => p.innerText?.trim())
-            .filter(text => text && text.length > 100)
-            .slice(0, 3);
-          return longParagraphs.join('\n');
+        allLinks.forEach(link => {
+          const href = (link.href || '').toLowerCase();
+          const text = (link.innerText || '').toLowerCase();
+          
+          if (href.includes('contact') || text.includes('contact') ||
+              href.includes('get-in-touch') || text.includes('get in touch')) {
+            if (link.href) contactLinks.push(link.href);
+          }
+          if (href.includes('about') || text.includes('about us') || text === 'about') {
+            if (link.href) aboutLinks.push(link.href);
+          }
         });
         
-        if (aboutText && aboutText.length > companyDescription.length) {
-          companyDescription = aboutText;
+        return { 
+          contactLinks: [...new Set(contactLinks)].slice(0, 2), 
+          aboutLinks: [...new Set(aboutLinks)].slice(0, 2) 
+        };
+      });
+      
+      // Visit contact page
+      if (links.contactLinks.length > 0) {
+        try {
+          await page.goto(links.contactLinks[0], { waitUntil: 'domcontentloaded', timeout: 20000 });
+          await randomSleep(1500, 2500);
+          
+          const contactText = await page.evaluate(() => document.body.innerText || '');
+          const contactHtml = await page.evaluate(() => document.body.innerHTML || '');
+          allText += '\n' + contactText;
+          allHtml += '\n' + contactHtml;
+        } catch (e) {
+          console.log(`Contact page error for ${companyName}: ${e.message}`);
         }
-        
-        allText += '\n' + aboutText;
-      } catch (e) {
-        console.log(`About page error for ${companyName}: ${e.message}`);
+      }
+      
+      // Visit about page for better description
+      if (links.aboutLinks.length > 0) {
+        try {
+          await page.goto(links.aboutLinks[0], { waitUntil: 'networkidle', timeout: 20000 });
+          // No extra delay needed
+          
+          const aboutText = await page.evaluate(() => {
+            const paragraphs = Array.from(document.querySelectorAll('p'));
+            const longParagraphs = paragraphs
+              .map(p => p.innerText?.trim())
+              .filter(text => text && text.length > 100)
+              .slice(0, 3);
+            return longParagraphs.join('\n');
+          });
+          
+          if (aboutText && aboutText.length > companyDescription.length) {
+            companyDescription = aboutText;
+          }
+          
+          allText += '\n' + aboutText;
+        } catch (e) {
+          console.log(`About page error for ${companyName}: ${e.message}`);
+        }
       }
     }
     
     // Extract contact information
     const phones = extractPhoneNumbers(allText);
-    const emails = extractEmails(allText, allHtml);
+    // Use centralized email extractor with business email filtering
+    const allEmails = extractEmails(allText, allHtml);
+    const emails = filterBusinessEmails(allEmails); // Only business emails
     const { landlines, mobiles } = categorizePhoneNumbers(phones);
     
-    // Prioritize business emails
-    const businessEmails = emails.filter(email => {
-      const domain = email.split('@')[1]?.toLowerCase();
-      return !['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'live.com', 'icloud.com'].includes(domain);
-    });
-    
-    const primaryEmail = businessEmails[0] || emails[0] || null;
+    // Get best email (prioritizes business emails)
+    const primaryEmail = getBestEmail(allEmails) || null;
     
     // Build contact record
     const contactData = {
-      company: cleanedCompanyName || companyName,
-      first_name: companyName,
+      company: truncateField(cleanedCompanyName || companyName, 100),
+      first_name: truncateField(companyName, 100),
       last_name: '',
       email: primaryEmail,
       phone_number: landlines[0] || null,
@@ -345,12 +539,13 @@ async function scrapeSingleWebsite(page, websiteUrl, options = {}) {
       company_summary: companyDescription.slice(0, 500) || null,
       location: null,
       job_title: null,
-      email_domain: primaryEmail ? primaryEmail.split('@')[1] : null,
+      email_domain: primaryEmail ? truncateField(primaryEmail.split('@')[1], 100) : null,
       source: 'website',
       email_verified: false,
       verification_status: primaryEmail ? 'unverified' : 'no_email',
-      industry: industry || null,
-      keywords: keywords || null,
+      industry: truncateField(industry, 100),
+      keywords: truncateField(keywords, 100),
+      search_query: truncateField(url, 200), // Store website URL as search query
       // Extra data for reference
       _allEmails: emails,
       _allPhones: phones
@@ -368,10 +563,11 @@ async function scrapeSingleWebsite(page, websiteUrl, options = {}) {
 // SINGLE WEBSITE SCRAPER (Original function - backward compatible)
 // ============================================
 
-async function runWebsiteScraper(websiteUrl, industry = null, keywords = null, progressCallback) {
+async function runWebsiteScraper(websiteUrl, industry = null, keywords = null, progressCallback, options = {}) {
+  const checkCancellation = options.checkCancellation || (() => false);
   // If array is passed, use bulk scraper
   if (Array.isArray(websiteUrl)) {
-    return runBulkWebsiteScraper(websiteUrl, industry, keywords, progressCallback);
+    return runBulkWebsiteScraper(websiteUrl, industry, keywords, progressCallback, options);
   }
   
   const scrapedData = [];
@@ -436,7 +632,7 @@ async function runWebsiteScraper(websiteUrl, industry = null, keywords = null, p
       });
     }
     
-    await randomSleep(1000, 2000);
+    await randomSleep(300, 500); // Reduced final delay
     await browser.close();
     
     return scrapedData;
@@ -557,9 +753,9 @@ async function runBulkWebsiteScraper(websiteUrls, industry = null, keywords = nu
         failedScrapes.push({ url, reason: error.message });
       }
       
-      // Delay between websites to avoid rate limiting
+      // Reduced delay between websites (still need some to avoid rate limiting)
       if (i < uniqueUrls.length - 1) {
-        await randomSleep(2000, 4000);
+        await randomSleep(800, 1500); // Reduced but still safe
       }
     }
     
@@ -621,7 +817,7 @@ async function runBulkWebsiteScraper(websiteUrls, industry = null, keywords = nu
       failedUrls: failedScrapes
     });
     
-    await randomSleep(1000, 2000);
+    await randomSleep(300, 500); // Reduced final delay
     await browser.close();
     
     return scrapedData;

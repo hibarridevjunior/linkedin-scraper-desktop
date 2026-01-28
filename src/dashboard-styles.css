@@ -12,6 +12,93 @@ body {
   line-height: 1.5;
 }
 
+/* Quota Exceeded Banner */
+.quota-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  background: linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%);
+  color: white;
+  padding: 16px 20px;
+  z-index: 10000;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  animation: slideDown 0.3s ease-out;
+}
+
+@keyframes slideDown {
+  from {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.quota-banner-content {
+  max-width: 1200px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.quota-banner-icon {
+  font-size: 24px;
+  flex-shrink: 0;
+}
+
+.quota-banner-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.quota-banner-text strong {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.quota-banner-text span {
+  font-size: 14px;
+  opacity: 0.95;
+  line-height: 1.4;
+}
+
+.quota-banner-dismiss {
+  background: rgba(255, 255, 255, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: white;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+
+.quota-banner-dismiss:hover {
+  background: rgba(255, 255, 255, 0.3);
+  transform: scale(1.1);
+}
+
+.quota-banner-dismiss:active {
+  transform: scale(0.95);
+}
+
+/* Adjust app container when banner is visible */
+body:has(.quota-banner[style*="display: block"]) .app-container {
+  margin-top: 80px;
+}
+
 /* App container */
 .app-container {
   display: flex;

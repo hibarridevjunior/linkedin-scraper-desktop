@@ -7,6 +7,18 @@
     <link rel="stylesheet" href="dashboard-styles.css" />
   </head>
   <body>
+    <!-- Quota Exceeded Notification Banner -->
+    <div id="quotaExceededBanner" class="quota-banner" style="display: none;">
+      <div class="quota-banner-content">
+        <div class="quota-banner-icon">⚠️</div>
+        <div class="quota-banner-text">
+          <strong>API Quota Exceeded</strong>
+          <span id="quotaBannerMessage">The Abstract Email Reputation API quota has been exhausted. Upgrade your plan or use a different API key to continue verification.</span>
+        </div>
+        <button id="dismissQuotaBanner" class="quota-banner-dismiss">×</button>
+      </div>
+    </div>
+    
     <div class="app-container">
       <!-- Sidebar -->
       <aside class="sidebar">

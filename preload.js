@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Scraping
   startScrape: (config) => ipcRenderer.invoke('start-scrape', config),
   startEmailScrape: (config) => ipcRenderer.invoke('start-email-scrape', config),
+  stopScrape: () => ipcRenderer.invoke('stop-scrape'),
   onProgress: (callback) => ipcRenderer.on('scrape-progress', (event, data) => callback(data)),
   openScraper: () => ipcRenderer.send('open-scraper'),
   
@@ -18,6 +19,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('update-contact-verification', contactId, isVerified, status),
   onVerificationProgress: (callback) => 
     ipcRenderer.on('verification-progress', (event, data) => callback(data)),
+  onQuotaExceeded: (callback) => 
+    ipcRenderer.on('quota-exceeded', (event, data) => callback(data)),
   
   // Industry management
   updateContactIndustry: (contactId, industry) => 

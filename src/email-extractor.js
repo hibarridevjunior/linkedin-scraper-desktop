@@ -215,6 +215,17 @@ function getBestEmail(emails) {
 }
 
 /**
+ * Helper function to truncate strings to database column limits
+ * @param {string} value - Value to truncate
+ * @param {number} maxLength - Maximum length (default 100)
+ * @returns {string|null} - Truncated value or original if not a string
+ */
+function truncateField(value, maxLength = 100) {
+  if (!value || typeof value !== 'string') return value;
+  return value.length > maxLength ? value.substring(0, maxLength) : value;
+}
+
+/**
  * Create contact object from email and context
  * @param {string} email - Email address
  * @param {string} text - Context text
@@ -230,38 +241,102 @@ function createContactFromEmail(email, text = '', additionalData = {}) {
   // Extract name and title from context
   const contextData = extractNameAndTitleFromContext(email, text);
   
-  // Build contact object
+  // Build contact object with truncation for database limits
   const contact = {
     email: email.toLowerCase(),
-    first_name: additionalData.firstName || contextData.firstName || null,
-    last_name: additionalData.lastName || contextData.lastName || null,
-    job_title: additionalData.jobTitle || contextData.jobTitle || null,
-    company: additionalData.company || extractCompanyFromDomain(email) || null,
-    email_domain: email.split('@')[1] || null,
+    first_name: truncateField(additionalData.firstName || contextData.firstName, 100),
+    last_name: truncateField(additionalData.lastName || contextData.lastName, 100),
+    job_title: truncateField(additionalData.jobTitle || contextData.jobTitle, 100),
+    company: truncateField(additionalData.company || extractCompanyFromDomain(email), 100),
+    email_domain: truncateField(email.split('@')[1], 100),
     source: additionalData.source || 'email_scraper',
     email_verified: false,
     verification_status: 'unverified',
-    industry: additionalData.industry || null,
-    keywords: additionalData.keywords || null,
-    location: additionalData.location || null,
+    industry: truncateField(additionalData.industry, 100),
+    keywords: truncateField(additionalData.keywords, 100),
+    location: truncateField(additionalData.location, 100),
     phone_number: additionalData.phone_number || null,
     mobile_number: additionalData.mobile_number || null,
     company_website: additionalData.company_website || null,
-    company_summary: additionalData.company_summary || null,
-    linkedin_url: additionalData.linkedin_url || null
+    company_summary: additionalData.company_summary ? truncateField(additionalData.company_summary, 500) : null,
+    linkedin_url: additionalData.linkedin_url || null,
+    search_query: truncateField(additionalData.search_query, 200) || null // Store original search query if provided
   };
   
   return contact;
+}
+
+/**
+ * Extract person's name from email address
+ * Handles common patterns: john.doe@company.com, john_doe@company.com, etc.
+ * @param {string} email - Email address
+ * @returns {Object} - { firstName, lastName, fullName } or null if no name pattern found
+ */
+function extractNameFromEmail(email) {
+  if (!email || typeof email !== 'string') return null;
+  
+  const localPart = email.split('@')[0].toLowerCase();
+  
+  // Skip if it's clearly not a name pattern (too short, numbers only, etc.)
+  if (localPart.length < 3 || /^[0-9]+$/.test(localPart)) return null;
+  
+  // Pattern 1: first.last (most common)
+  if (localPart.includes('.')) {
+    const parts = localPart.split('.');
+    if (parts.length >= 2 && parts[0].length >= 2 && parts[1].length >= 2) {
+      const firstName = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
+      const lastName = parts.slice(1).map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
+      return { firstName, lastName, fullName: `${firstName} ${lastName}` };
+    }
+  }
+  
+  // Pattern 2: first_last
+  if (localPart.includes('_')) {
+    const parts = localPart.split('_');
+    if (parts.length >= 2 && parts[0].length >= 2 && parts[1].length >= 2) {
+      const firstName = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
+      const lastName = parts.slice(1).map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
+      return { firstName, lastName, fullName: `${firstName} ${lastName}` };
+    }
+  }
+  
+  // Pattern 3: firstlast (no separator, try to split at capital letter if present)
+  // This is harder, so we'll be more conservative
+  if (localPart.length >= 6 && !localPart.includes('.') && !localPart.includes('_') && !localPart.includes('-')) {
+    // Try to find a split point (common: first 3-5 chars for first name)
+    const commonFirstNameLengths = [3, 4, 5];
+    for (const len of commonFirstNameLengths) {
+      if (localPart.length > len && localPart.length - len >= 2) {
+        const firstName = localPart.substring(0, len).charAt(0).toUpperCase() + localPart.substring(0, len).slice(1);
+        const lastName = localPart.substring(len).charAt(0).toUpperCase() + localPart.substring(len).slice(1);
+        return { firstName, lastName, fullName: `${firstName} ${lastName}` };
+      }
+    }
+  }
+  
+  // Pattern 4: first-last (hyphen)
+  if (localPart.includes('-')) {
+    const parts = localPart.split('-');
+    if (parts.length >= 2 && parts[0].length >= 2 && parts[1].length >= 2) {
+      const firstName = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
+      const lastName = parts.slice(1).map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
+      return { firstName, lastName, fullName: `${firstName} ${lastName}` };
+    }
+  }
+  
+  return null;
 }
 
 module.exports = {
   extractEmails,
   isPersonalEmail,
   filterBusinessEmails,
+  extractNameFromEmail,
   extractNameAndTitleFromContext,
   extractCompanyFromDomain,
   isValidEmailFormat,
   getBestEmail,
   createContactFromEmail,
+  truncateField,
   PERSONAL_EMAIL_DOMAINS
 };

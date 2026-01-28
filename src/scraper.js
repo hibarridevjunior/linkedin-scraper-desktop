@@ -26,6 +26,12 @@ function extractDomain(email) {
   return email.split('@')[1] || '';
 }
 
+// Helper function to truncate strings to database column limits
+function truncateField(value, maxLength = 100) {
+  if (!value || typeof value !== 'string') return value;
+  return value.length > maxLength ? value.substring(0, maxLength) : value;
+}
+
 function generateEmails(firstName, lastName, domain) {
   const first = firstName.toLowerCase().replace(/[^a-z]/g, '');
   const last = lastName.toLowerCase().replace(/[^a-z]/g, '');
@@ -118,6 +124,172 @@ function matchesJobTitle(profileData, targetTitles) {
   return false;
 }
 
+/**
+ * Search LinkedIn by keywords (people search)
+ * @param {Page} page - Playwright page instance
+ * @param {string} keywords - Search keywords (e.g., "software engineer", "marketing manager")
+ * @param {number} maxProfiles - Maximum profiles to collect
+ * @param {Function} progressCallback - Progress callback
+ * @returns {Array<string>} - Array of profile URLs
+ */
+async function searchLinkedInByKeywords(page, keywords, maxProfiles, progressCallback, checkCancellation = null, location = null) {
+  // Build search query with location if provided
+  let searchQuery = keywords;
+  if (location && typeof location === 'string' && location.trim()) {
+    const locationTrimmed = location.trim();
+    searchQuery = `${keywords} ${locationTrimmed}`;
+    progressCallback({ status: `Searching LinkedIn for "${keywords}" in "${locationTrimmed}"...`, profilesFound: 0, profilesScraped: 0 });
+  } else {
+    progressCallback({ status: `Searching LinkedIn for "${keywords}"...`, profilesFound: 0, profilesScraped: 0 });
+  }
+  
+  // LinkedIn people search URL
+  // For location filtering, we add it to keywords for now (LinkedIn's geoUrn requires location IDs)
+  let searchUrl = `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(searchQuery)}`;
+  
+  // Try to add location filter if location is provided separately (not in keywords)
+  // Note: LinkedIn uses geoUrn with location IDs, but we'll use keyword approach for simplicity
+  console.log(`Searching LinkedIn with URL: ${searchUrl}`);
+  
+  await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  
+  // Wait for page to load - try multiple possible selectors
+  await page.waitForSelector('.search-results-container, .reusable-search__result-container, .search-results, [data-chameleon-result-urn]', { timeout: 20000 }).catch(() => {
+    console.log('Warning: Search results container not found, continuing anyway...');
+  });
+  // Reduced delay - waitForSelector already ensures page is ready
+  await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+  
+  const profileUrls = [];
+  let scrollAttempts = 0;
+  let noNewCount = 0;
+  
+  while (profileUrls.length < maxProfiles && scrollAttempts < 20 && noNewCount < 4) {
+    // Check for cancellation
+    if (checkCancellation && checkCancellation()) {
+      break;
+    }
+    
+    progressCallback({ 
+      status: `Collecting profiles (${profileUrls.length} found)...`, 
+      profilesFound: profileUrls.length, 
+      profilesScraped: 0 
+    });
+    
+    // Scroll to load more results - more aggressive scrolling for keyword searches
+    for (let i = 0; i < 5; i++) {
+      await page.evaluate(() => {
+        window.scrollBy(0, 500);
+        // Also try scrolling the results container if it exists
+        const resultsContainer = document.querySelector('.scaffold-finite-scroll__content, .search-results-container, [role="main"]');
+        if (resultsContainer) {
+          resultsContainer.scrollTop += 500;
+        }
+      });
+      await randomSleep(300, 500); // Slightly longer delay to let content load
+    }
+    await randomSleep(1500, 2000); // Wait longer for LinkedIn to load more results
+    
+    const beforeCount = profileUrls.length;
+    const newUrls = await page.evaluate(() => {
+      const urls = [];
+      const seen = new Set();
+      
+      // Try multiple selectors for LinkedIn search results (updated for current LinkedIn UI)
+      const selectors = [
+        '.reusable-search__result-container a[href*="/in/"]',
+        '.search-result__info a[href*="/in/"]',
+        '.entity-result__item a[href*="/in/"]',
+        '.entity-result a[href*="/in/"]',
+        '.search-result a[href*="/in/"]',
+        '.entity-result__title-text a[href*="/in/"]',
+        '.base-search__result a[href*="/in/"]',
+        '.search-result__wrapper a[href*="/in/"]',
+        'a[href*="/in/"][href*="search"]',
+        'a[href*="/in/"]' // Catch-all for any profile link
+      ];
+      
+      // Also try to find all links first, then filter
+      const allLinks = document.querySelectorAll('a[href*="/in/"]');
+      console.log(`Found ${allLinks.length} total links with /in/ in the page`);
+      
+      for (const selector of selectors) {
+        try {
+          const links = document.querySelectorAll(selector);
+          console.log(`Selector "${selector}" found ${links.length} links`);
+          links.forEach(link => {
+            if (link?.href && link.href.includes('/in/')) {
+              try {
+                // Extract clean profile URL
+                const urlMatch = link.href.match(/\/in\/([^\/\?]+)/);
+                if (urlMatch && urlMatch[1]) {
+                  const profileId = urlMatch[1];
+                  // Skip if it's a search page, miniprofile, or other non-profile pages
+                  if (profileId && 
+                      !profileId.includes('search') && 
+                      !profileId.includes('miniprofile') &&
+                      !profileId.includes('pub') &&
+                      profileId.length > 2) {
+                    const cleanUrl = `https://www.linkedin.com/in/${profileId}`;
+                    if (!seen.has(cleanUrl)) {
+                      seen.add(cleanUrl);
+                      urls.push(cleanUrl);
+                    }
+                  }
+                }
+              } catch (e) {
+                // Skip invalid URLs
+              }
+            }
+          });
+        } catch (e) {
+          // Continue with next selector
+        }
+      }
+      
+      const uniqueUrls = [...new Set(urls)];
+      console.log(`Extracted ${uniqueUrls.length} unique profile URLs from page`);
+      return uniqueUrls;
+    });
+    
+    // Add new URLs that aren't already in our list
+    let addedCount = 0;
+    for (const url of newUrls) {
+      if (!profileUrls.includes(url)) {
+        profileUrls.push(url);
+        addedCount++;
+      }
+    }
+    console.log(`Added ${addedCount} new unique profile URLs`);
+    
+    console.log(`Found ${newUrls.length} new profile URLs, total: ${profileUrls.length}`);
+    
+    // If we found new URLs, reset the noNewCount
+    if (profileUrls.length === beforeCount) {
+      noNewCount++;
+      console.log(`No new profiles found (attempt ${noNewCount}/6)`);
+    } else {
+      noNewCount = 0;
+    }
+    
+    // If we've reached maxProfiles, we can stop early
+    if (profileUrls.length >= maxProfiles) {
+      console.log(`Reached target of ${maxProfiles} profiles, stopping scroll`);
+      break;
+    }
+    
+    scrollAttempts++;
+  }
+  
+  console.log(`Keyword search completed: Found ${profileUrls.length} profile URLs (target: ${maxProfiles})`);
+  
+  // Return all found profiles up to maxProfiles
+  const finalUrls = profileUrls.slice(0, maxProfiles);
+  console.log(`Returning ${finalUrls.length} profile URLs to scrape`);
+  
+  return finalUrls;
+}
+
 async function goToCompanyPeoplePage(page, companyName, progressCallback) {
   progressCallback({ status: `Searching for ${companyName}...`, profilesFound: 0, profilesScraped: 0 });
   
@@ -125,7 +297,7 @@ async function goToCompanyPeoplePage(page, companyName, progressCallback) {
   await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
   
   await page.waitForSelector('.search-results-container', { timeout: 20000 }).catch(() => {});
-  await randomSleep(3000, 4000);
+  await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {}); // Smart wait instead of fixed delay
   
   const allHrefs = await page.evaluate(() => {
     const links = Array.from(document.querySelectorAll('a[href*="/company/"]'));
@@ -173,21 +345,26 @@ async function goToCompanyPeoplePage(page, companyName, progressCallback) {
   const peoplePageUrl = `https://www.linkedin.com/company/${slugMatch[1]}/people/`;
   progressCallback({ status: `Going to ${companyName} employees page...`, profilesFound: 0, profilesScraped: 0 });
   
-  await page.goto(peoplePageUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await randomSleep(3000, 5000);
+  await page.goto(peoplePageUrl, { waitUntil: 'networkidle', timeout: 60000 });
+  // No extra delay needed - networkidle already waits for page to be ready
   
   return slugMatch[1];
 }
 
-async function collectProfilesFromPeoplePage(page, maxProfiles, progressCallback) {
+async function collectProfilesFromPeoplePage(page, maxProfiles, progressCallback, checkCancellation = null) {
   const profileUrls = [];
   let scrollAttempts = 0;
   let noNewCount = 0;
   
   await page.waitForSelector('.org-people-profile-card, .scaffold-finite-scroll__content', { timeout: 15000 }).catch(() => {});
-  await randomSleep(2000, 3000);
+  await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {}); // Smart wait
   
   while (profileUrls.length < maxProfiles && scrollAttempts < 20 && noNewCount < 4) {
+    // Check for cancellation
+    if (checkCancellation && checkCancellation()) {
+      break;
+    }
+    
     progressCallback({ 
       status: `Collecting profiles (${profileUrls.length} found)...`, 
       profilesFound: profileUrls.length, 
@@ -197,9 +374,9 @@ async function collectProfilesFromPeoplePage(page, maxProfiles, progressCallback
     // Scroll in smaller increments for more natural behavior
     for (let i = 0; i < 3; i++) {
       await page.evaluate(() => window.scrollBy(0, 400));
-      await randomSleep(200, 400);
+      await randomSleep(100, 200); // Reduced delay
     }
-    await randomSleep(1000, 1500);
+    await randomSleep(300, 500); // Reduced delay
     
     const beforeCount = profileUrls.length;
     const newUrls = await page.evaluate(() => {
@@ -232,7 +409,7 @@ async function collectProfilesFromPeoplePage(page, maxProfiles, progressCallback
   return profileUrls.slice(0, maxProfiles);
 }
 
-async function runLinkedInScraper(companyName, companyDomain, maxProfiles = 20, jobTitles = null, industry = null, keywords = null, progressCallback) {
+async function runLinkedInScraper(companyName, companyDomain, maxProfiles = 20, jobTitles = null, industry = null, keywords = null, progressCallback, searchMode = 'company', checkCancellation = null, location = null) {
   const scrapedProfiles = [];
   let browser;
   
@@ -254,8 +431,8 @@ async function runLinkedInScraper(companyName, companyDomain, maxProfiles = 20, 
     page.setDefaultTimeout(60000);
     
     progressCallback({ status: 'Opening LinkedIn...', profilesFound: 0, profilesScraped: 0 });
-    await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await randomSleep(2000, 3000);
+    await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'networkidle', timeout: 60000 });
+    // No extra delay needed
     
     // Check if logged in
     const isLoggedIn = await page.evaluate(() => {
@@ -270,14 +447,29 @@ async function runLinkedInScraper(companyName, companyDomain, maxProfiles = 20, 
       await page.goto('https://www.linkedin.com/login', { waitUntil: 'domcontentloaded' });
       await page.waitForSelector('.global-nav__me-photo, .feed-identity-module, .search-global-typeahead', { timeout: 300000 });
       progressCallback({ status: 'Login successful!', profilesFound: 0, profilesScraped: 0 });
-      await randomSleep(2000, 3000);
+      await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {}); // Smart wait
     }
     
-    await goToCompanyPeoplePage(page, companyName, progressCallback);
-    const profileUrls = await collectProfilesFromPeoplePage(page, maxProfiles, progressCallback);
+    let profileUrls = [];
     
-    if (profileUrls.length === 0) {
-      throw new Error('No profiles found on company page');
+    // Choose search mode: company or keyword
+    if (searchMode === 'keyword' && keywords) {
+      // Search by keywords
+      const location = arguments[8] || null; // Get location parameter (9th argument)
+      profileUrls = await searchLinkedInByKeywords(page, keywords, maxProfiles, progressCallback, checkCancellation, location);
+      
+      if (profileUrls.length === 0) {
+        // Provide more helpful error message
+        throw new Error(`No profiles found matching "${keywords}". Try:\n- Using different keywords\n- Removing location (e.g., just "software engineer")\n- Using company name instead\n- Checking if you're logged into LinkedIn`);
+      }
+    } else {
+      // Search by company (default)
+      await goToCompanyPeoplePage(page, companyName, progressCallback);
+      profileUrls = await collectProfilesFromPeoplePage(page, maxProfiles, progressCallback, checkCancellation);
+      
+      if (profileUrls.length === 0) {
+        throw new Error(`No profiles found on company page for "${companyName}". The company may not have public employee listings on LinkedIn.`);
+      }
     }
     
     progressCallback({ 
@@ -287,6 +479,17 @@ async function runLinkedInScraper(companyName, companyDomain, maxProfiles = 20, 
     });
     
     for (let i = 0; i < profileUrls.length; i++) {
+      // Check for cancellation before each profile
+      if (checkCancellation && checkCancellation()) {
+        progressCallback({ 
+          status: 'Scraping cancelled by user', 
+          profilesFound: profileUrls.length, 
+          profilesScraped: scrapedProfiles.length,
+          cancelled: true
+        });
+        break;
+      }
+      
       progressCallback({ 
         status: `Scraping ${i + 1}/${profileUrls.length}...`, 
         profilesFound: profileUrls.length, 
@@ -294,10 +497,17 @@ async function runLinkedInScraper(companyName, companyDomain, maxProfiles = 20, 
       });
       
       try {
-        await page.goto(profileUrls[i], { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await randomSleep(2000, 3500);
+        await page.goto(profileUrls[i], { waitUntil: 'networkidle', timeout: 30000 });
+        // No extra delay needed - networkidle already waits
         
         const profileData = await extractProfileData(page);
+        
+        // For keyword searches, try to extract company from profile if not provided
+        if (searchMode === 'keyword' && !companyDomain && profileData?.company) {
+          // Try to extract domain from company name
+          const companyNameFromProfile = profileData.company;
+          // This is a fallback - we don't have the actual domain
+        }
         
         if (profileData?.fullName) {
           // Check job title filter
@@ -328,39 +538,86 @@ async function runLinkedInScraper(companyName, companyDomain, maxProfiles = 20, 
           // Use extracted email if found, otherwise generate
           let primaryEmail = businessEmails.length > 0 ? businessEmails[0] : null;
           
-          if (!primaryEmail) {
-            // Fallback to generated email
-            const emailVariations = generateEmails(firstName, lastName, companyDomain);
+          // Extract company domain from profile if available (for keyword searches)
+          let finalCompanyDomain = companyDomain;
+          if (searchMode === 'keyword' && profileData?.company && !finalCompanyDomain) {
+            // Try to infer domain from company name (fallback)
+            const inferredDomain = profileData.company.toLowerCase().replace(/\s+/g, '').replace(/[^a-z0-9]/g, '') + '.com';
+            finalCompanyDomain = inferredDomain;
+          }
+          
+          // For keyword searches without domain, try to extract from email if found
+          if (searchMode === 'keyword' && !finalCompanyDomain && primaryEmail) {
+            finalCompanyDomain = extractDomain(primaryEmail);
+          }
+          
+          if (!primaryEmail && finalCompanyDomain) {
+            // Fallback to generated email (only if we have a domain)
+            const emailVariations = generateEmails(firstName, lastName, finalCompanyDomain);
             primaryEmail = emailVariations[0] || '';
           }
           
-          if (primaryEmail && !isPersonalEmail(primaryEmail)) {
+          // Filter by location if provided (for company searches)
+          if (location && typeof location === 'string' && location.trim() && searchMode === 'company') {
+            const profileLocation = profileData.location?.toLowerCase() || '';
+            const searchLocation = location.trim().toLowerCase();
+            
+            // Check if location matches (partial match is OK)
+            if (profileLocation && !profileLocation.includes(searchLocation)) {
+              progressCallback({ 
+                status: `Skipping (location mismatch): ${profileData.fullName} - ${profileData.location}`, 
+                profilesFound: profileUrls.length, 
+                profilesScraped: scrapedProfiles.length 
+              });
+              continue;
+            }
+          }
+          
+          // Save profile if we have a name (email is optional but preferred)
+          if (firstName || lastName) {
+            // Only add email if it's valid and not personal
+            const validEmail = primaryEmail && !isPersonalEmail(primaryEmail) ? primaryEmail : null;
+            
+            // Build search query for this contact
+            let searchQueryForContact = '';
+            if (searchMode === 'keyword' && keywords) {
+              searchQueryForContact = location && typeof location === 'string' && location.trim() 
+                ? `${keywords} ${location.trim()}` 
+                : keywords;
+            } else if (searchMode === 'company' && companyName) {
+              searchQueryForContact = companyName;
+            }
+            
             scrapedProfiles.push({
-              first_name: firstName,
-              last_name: lastName,
-              email: primaryEmail,
-              company: profileData.company || companyName,
-              job_title: profileData.jobTitle || null,
-              location: profileData.location || null,
-              email_domain: extractDomain(primaryEmail),
+              first_name: truncateField(firstName, 100),
+              last_name: truncateField(lastName, 100),
+              email: validEmail,
+              company: truncateField(profileData.company || companyName || 'Unknown', 100),
+              job_title: truncateField(profileData.jobTitle, 100),
+              location: truncateField(profileData.location, 100),
+              email_domain: validEmail ? truncateField(extractDomain(validEmail), 100) : null,
               source: 'linkedin',
               email_verified: false,
-              verification_status: 'unverified',
-              industry: industry || null,
-              keywords: keywords || null,
-              linkedin_url: profileUrls[i]
+              verification_status: validEmail ? 'unverified' : 'no_email',
+              industry: truncateField(industry, 100),
+              keywords: truncateField(keywords, 100),
+              linkedin_url: profileUrls[i], // URLs can be longer, but this field might not have a limit
+              search_query: truncateField(searchQueryForContact, 200) // Store original search query
             });
+          } else {
+            console.log(`Skipping profile ${i + 1}: No name found`);
           }
         }
       } catch (error) {
         console.log(`Error scraping profile ${i + 1}: ${error.message}`);
       }
       
-      // Random delay between profiles
-      await randomSleep(1500, 2500);
+      // Reduced delay between profiles
+      await randomSleep(400, 700);
     }
     
     // Save to Supabase
+    console.log(`Total profiles scraped: ${scrapedProfiles.length} out of ${profileUrls.length} profile URLs`);
     if (scrapedProfiles.length > 0) {
       progressCallback({ 
         status: `Saving ${scrapedProfiles.length} contacts to database...`, 
@@ -368,8 +625,33 @@ async function runLinkedInScraper(companyName, companyDomain, maxProfiles = 20, 
         profilesScraped: scrapedProfiles.length 
       });
       
-      // Remove duplicates by email
-      const uniqueProfiles = [...new Map(scrapedProfiles.map(p => [p.email, p])).values()];
+      // Remove duplicates by email (or LinkedIn URL if no email)
+      const uniqueProfiles = [];
+      const seenEmails = new Set();
+      const seenUrls = new Set();
+      
+      for (const profile of scrapedProfiles) {
+        if (profile.email) {
+          // Deduplicate by email
+          if (!seenEmails.has(profile.email.toLowerCase())) {
+            seenEmails.add(profile.email.toLowerCase());
+            uniqueProfiles.push(profile);
+          }
+        } else if (profile.linkedin_url) {
+          // Deduplicate by LinkedIn URL if no email
+          if (!seenUrls.has(profile.linkedin_url)) {
+            seenUrls.add(profile.linkedin_url);
+            uniqueProfiles.push(profile);
+          }
+        } else {
+          // Fallback: deduplicate by name + company
+          const key = `${profile.first_name}_${profile.last_name}_${profile.company}`.toLowerCase();
+          if (!seenUrls.has(key)) {
+            seenUrls.add(key);
+            uniqueProfiles.push(profile);
+          }
+        }
+      }
       
       const { data, error } = await supabase
         .from('contacts')
@@ -380,8 +662,9 @@ async function runLinkedInScraper(companyName, companyDomain, maxProfiles = 20, 
       
       if (error) {
         console.error('Supabase save error:', error);
+        throw new Error(`Failed to save contacts: ${error.message}`);
       } else {
-        console.log(`Successfully saved ${uniqueProfiles.length} contacts`);
+        console.log(`Successfully saved ${uniqueProfiles.length} unique contacts (${uniqueProfiles.filter(p => p.email).length} with emails)`);
       }
     }
     
@@ -392,7 +675,7 @@ async function runLinkedInScraper(companyName, companyDomain, maxProfiles = 20, 
       completed: true
     });
     
-    await randomSleep(2000, 3000);
+    await randomSleep(500, 1000); // Reduced final delay
     await browser.close();
     
     return scrapedProfiles;

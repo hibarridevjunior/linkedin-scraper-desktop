@@ -23,45 +23,86 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 /**
  * Merge contact data from multiple sources
- * Keeps the most complete record for each email
+ * Keeps the most complete record for each email (or company name if no email)
  * @param {Array<Object>} contacts - Array of contact objects
  * @returns {Array<Object>} - Deduplicated and merged contacts
  */
 function mergeContacts(contacts) {
   const emailMap = new Map();
+  const noEmailMap = new Map(); // For contacts without emails, keyed by company name
   
   for (const contact of contacts) {
-    if (!contact.email) continue;
-    
-    const email = contact.email.toLowerCase();
-    const existing = emailMap.get(email);
-    
-    if (!existing) {
-      // First time seeing this email
-      emailMap.set(email, { ...contact });
-    } else {
-      // Merge with existing contact (prefer non-null values)
-      const merged = { ...existing };
+    if (contact.email) {
+      // Contacts with email: deduplicate by email
+      const email = contact.email.toLowerCase();
+      const existing = emailMap.get(email);
       
-      // Merge fields, preferring new data if existing is null
-      Object.keys(contact).forEach(key => {
-        if (contact[key] !== null && contact[key] !== undefined && contact[key] !== '') {
-          if (!merged[key] || merged[key] === null || merged[key] === '') {
-            merged[key] = contact[key];
+      if (!existing) {
+        // First time seeing this email
+        emailMap.set(email, { ...contact });
+      } else {
+        // Merge with existing contact (prefer non-null values)
+        const merged = { ...existing };
+        
+        // Merge fields, preferring new data if existing is null
+        Object.keys(contact).forEach(key => {
+          if (contact[key] !== null && contact[key] !== undefined && contact[key] !== '') {
+            if (!merged[key] || merged[key] === null || merged[key] === '') {
+              merged[key] = contact[key];
+            }
           }
+        });
+        
+        // If sources are different, combine them
+        if (contact.source && existing.source && contact.source !== existing.source) {
+          merged.source = `${existing.source},${contact.source}`;
         }
-      });
+        
+        emailMap.set(email, merged);
+      }
+    } else {
+      // Contacts without email: deduplicate by company name (or first_name if no company)
+      const key = (contact.company || contact.first_name || '').toLowerCase().trim();
       
-      // If sources are different, combine them
-      if (contact.source && existing.source && contact.source !== existing.source) {
-        merged.source = `${existing.source},${contact.source}`;
+      if (!key) {
+        // Skip contacts with no email, company, or name
+        continue;
       }
       
-      emailMap.set(email, merged);
+      const existing = noEmailMap.get(key);
+      
+      if (!existing) {
+        // First time seeing this company/name
+        noEmailMap.set(key, { ...contact });
+      } else {
+        // Merge with existing contact (prefer non-null values)
+        const merged = { ...existing };
+        
+        // Merge fields, preferring new data if existing is null
+        Object.keys(contact).forEach(key => {
+          if (contact[key] !== null && contact[key] !== undefined && contact[key] !== '') {
+            if (!merged[key] || merged[key] === null || merged[key] === '') {
+              merged[key] = contact[key];
+            }
+          }
+        });
+        
+        // If sources are different, combine them
+        if (contact.source && existing.source && contact.source !== existing.source) {
+          merged.source = `${existing.source},${contact.source}`;
+        }
+        
+        noEmailMap.set(key, merged);
+      }
     }
   }
   
-  return Array.from(emailMap.values());
+  // Combine both maps: contacts with emails first, then contacts without emails
+  const result = [...Array.from(emailMap.values()), ...Array.from(noEmailMap.values())];
+  
+  console.log(`mergeContacts: ${contacts.length} input -> ${emailMap.size} with email + ${noEmailMap.size} without email = ${result.length} total`);
+  
+  return result;
 }
 
 /**
@@ -75,7 +116,7 @@ function mergeContacts(contacts) {
  * @param {Function} progressCallback - Progress callback function
  * @returns {Object} - { success, results, stats, errors }
  */
-async function runUnifiedEmailScraper(config, progressCallback) {
+async function runUnifiedEmailScraper(config, progressCallback, checkCancellationFn = null) {
   const {
     query,
     sources = {},
@@ -109,6 +150,32 @@ async function runUnifiedEmailScraper(config, progressCallback) {
     };
   };
   
+  // Helper function to check cancellation - use passed function or fallback
+  const checkCancellation = () => {
+    try {
+      // Use passed cancellation function first
+      if (checkCancellationFn && typeof checkCancellationFn === 'function') {
+        return checkCancellationFn();
+      }
+      // Fallback to global if available
+      if (global && typeof global.isScrapingCancelled === 'function') {
+        return global.isScrapingCancelled();
+      }
+      return false;
+    } catch (e) {
+      return false;
+    }
+  };
+  
+  // Helper function to calculate stats from contacts
+  const calculateStats = (contacts) => {
+    return {
+      total: contacts.length,
+      withEmail: contacts.filter(c => c && c.email).length,
+      withPhone: contacts.filter(c => c && (c.phone_number || c.mobile_number || c.whatsapp_number)).length
+    };
+  };
+  
   // ========== LINKEDIN SCRAPER ==========
   if (sources.linkedin) {
     try {
@@ -129,12 +196,23 @@ async function runUnifiedEmailScraper(config, progressCallback) {
         [], // jobTitles - empty for all employees
         industry,
         keywords,
-        createSourceProgressCallback('linkedin')
+        createSourceProgressCallback('linkedin'),
+        'company', // searchMode
+        checkCancellation // Pass cancellation check
       );
       
       if (linkedinResults && linkedinResults.length > 0) {
         allContacts.push(...linkedinResults);
         sourceStats.linkedin.found = linkedinResults.length;
+        
+        // Send intermediate results to UI
+        progressCallback({
+          status: `LinkedIn scraper completed: Found ${linkedinResults.length} contacts`,
+          source: 'linkedin',
+          phase: 'complete',
+          intermediateResults: linkedinResults,
+          stats: calculateStats(linkedinResults)
+        });
       }
     } catch (error) {
       console.error('LinkedIn scraper error:', error);
@@ -157,13 +235,23 @@ async function runUnifiedEmailScraper(config, progressCallback) {
         searchQuery,
         maxResultsPerSource,
         industry,
-        keywords,
-        createSourceProgressCallback('googleSearch')
+        keywords || query, // Pass original query as keywords if keywords not provided
+        createSourceProgressCallback('googleSearch'),
+        { checkCancellation: checkCancellation, originalQuery: query } // Pass original query
       );
       
       if (searchResults && searchResults.length > 0) {
         allContacts.push(...searchResults);
         sourceStats.googleSearch.found = searchResults.length;
+        
+        // Send intermediate results to UI
+        progressCallback({
+          status: `Google Search completed: Found ${searchResults.length} contacts`,
+          source: 'googleSearch',
+          phase: 'complete',
+          intermediateResults: searchResults,
+          stats: calculateStats(searchResults)
+        });
       }
     } catch (error) {
       console.error('Google Search scraper error:', error);
@@ -192,17 +280,33 @@ async function runUnifiedEmailScraper(config, progressCallback) {
       });
       
       const mapsResults = await runGoogleMapsScraper(
-        query,
+        query, // This is the original search query
         maxResultsPerSource,
         industry,
         keywords,
         createSourceProgressCallback('googleMaps'),
-        { enableEnrichment: true } // Always enable enrichment for email scraping
+        { 
+          enableEnrichment: true, // Always enable enrichment for email scraping
+          checkCancellation: checkCancellation // Pass cancellation check
+        }
       );
       
       if (mapsResults && mapsResults.length > 0) {
+        console.log(`Google Maps scraper returned ${mapsResults.length} businesses to email-scraper-service`);
         allContacts.push(...mapsResults);
         sourceStats.googleMaps.found = mapsResults.length;
+        console.log(`Total contacts after adding Google Maps: ${allContacts.length}`);
+        
+        // Send intermediate results to UI
+        progressCallback({
+          status: `Google Maps completed: Found ${mapsResults.length} contacts`,
+          source: 'googleMaps',
+          phase: 'complete',
+          intermediateResults: mapsResults,
+          stats: calculateStats(mapsResults)
+        });
+      } else {
+        console.log(`Google Maps scraper returned ${mapsResults ? mapsResults.length : 0} businesses (empty or null)`);
       }
     } catch (error) {
       console.error('Google Maps scraper error:', error);
@@ -211,8 +315,26 @@ async function runUnifiedEmailScraper(config, progressCallback) {
     }
   }
   
+  // Check cancellation before next source - but continue if we have contacts
+  if (checkCancellation() && allContacts.length === 0) {
+    // Only return early if cancelled AND no contacts found yet
+    progressCallback({
+      status: 'Scraping cancelled by user',
+      cancelled: true,
+      phase: 'complete'
+    });
+    return {
+      success: false,
+      results: allContacts,
+      stats: calculateStats(allContacts),
+      errors: errors,
+      cancelled: true
+    };
+  }
+  // If cancelled but we have contacts, continue to merge and return them
+  
   // ========== WEBSITE SCRAPER ==========
-  if (sources.websites) {
+  if (sources.websites && !checkCancellation()) {
     try {
       progressCallback({
         status: 'Starting Website scraper...',
@@ -231,12 +353,22 @@ async function runUnifiedEmailScraper(config, progressCallback) {
           websiteUrls,
           industry,
           keywords,
-          createSourceProgressCallback('websites')
+          createSourceProgressCallback('websites'),
+          { checkCancellation: checkCancellation } // Pass cancellation check
         );
         
         if (websiteResults && websiteResults.length > 0) {
           allContacts.push(...websiteResults);
           sourceStats.websites.found = websiteResults.length;
+          
+          // Send intermediate results to UI
+          progressCallback({
+            status: `Website scraper completed: Found ${websiteResults.length} contacts`,
+            source: 'websites',
+            phase: 'complete',
+            intermediateResults: websiteResults,
+            stats: calculateStats(websiteResults)
+          });
         }
       } else {
         // If query doesn't look like URLs, try to construct search
@@ -259,7 +391,12 @@ async function runUnifiedEmailScraper(config, progressCallback) {
     phase: 'merge'
   });
   
+  console.log(`Total contacts collected from all sources: ${allContacts.length}`);
+  console.log(`Source stats:`, sourceStats);
+  
   const mergedContacts = mergeContacts(allContacts);
+  
+  console.log(`After deduplication: ${mergedContacts.length} unique contacts`);
   
   // ========== FINAL SAVE TO DATABASE ==========
   if (mergedContacts.length > 0) {
@@ -300,12 +437,22 @@ async function runUnifiedEmailScraper(config, progressCallback) {
     stats
   });
   
-  return {
-    success: true,
+  // Always return results, even if empty (so user knows what happened)
+  const finalResult = {
+    success: mergedContacts.length > 0 || errors.length === 0, // Success if we got results OR no errors occurred
     results: mergedContacts,
     stats,
     errors: errors.length > 0 ? errors : null
   };
+  
+  console.log('Final result:', {
+    success: finalResult.success,
+    resultsCount: finalResult.results.length,
+    errorsCount: errors.length,
+    stats: finalResult.stats
+  });
+  
+  return finalResult;
 }
 
 module.exports = { runUnifiedEmailScraper, mergeContacts };

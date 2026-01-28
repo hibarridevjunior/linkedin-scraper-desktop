@@ -421,7 +421,8 @@ body {
 
 /* Buttons */
 .btn-primary,
-.btn-secondary {
+.btn-secondary,
+.btn-danger {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -465,6 +466,30 @@ body {
 
 .btn-secondary:hover {
   background: #e0e0e0;
+}
+
+.btn-danger {
+  background: #ff4757;
+  color: white;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #e63946;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(255, 71, 87, 0.4);
+}
+
+.btn-danger:disabled {
+  background: #ccc;
+  color: #999;
+  cursor: not-allowed;
+  transform: none;
+  opacity: 0.6;
+}
+
+.btn-danger svg {
+  width: 16px;
+  height: 16px;
 }
 
 /* Progress */
