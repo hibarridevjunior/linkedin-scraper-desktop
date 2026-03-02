@@ -55,6 +55,9 @@ packages/
 coverage/
 .nyc_output/
 
+# Documentation (excluded from repo)
+*.md
+
 # Misc
 *.bak
 *.cache
