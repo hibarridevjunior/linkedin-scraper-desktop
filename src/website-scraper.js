@@ -1,19 +1,15 @@
+/**
+ * Website scraper — one job config; returns contacts; no Supabase.
+ * Job boundaries: one browser per job; browser closed after job. Cancellation checks between sites.
+ * IPC progress: only counts/phase via progressCallback; no contact arrays or Playwright refs.
+ */
+
 const { launchBrowser } = require('./browser-helper');
-const { createClient } = require('@supabase/supabase-js');
-const { extractEmails, filterBusinessEmails, getBestEmail } = require('./email-extractor');
+const { extractEmails, extractMailtoEmails, filterBusinessEmails, getBestEmail, extractCompanyName } = require('./email-extractor');
+const { websiteDelay } = require('./cooldown-config');
 const https = require('https');
 const http = require('http');
 const { parseString } = require('xml2js');
-
-const SUPABASE_URL = 'https://cvecdppmqcxgofetrfir.supabase.co';
-const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN2ZWNkcHBtcWN4Z29mZXRyZmlyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc1ODQ3NDYsImV4cCI6MjA4MzE2MDc0Nn0.GjF5fvkdeDo8kjso3RxQTVEroMO6-hideVgPAYWDyvc';
-
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-
-function randomSleep(min = 1000, max = 3000) {
-  const ms = Math.floor(Math.random() * (max - min + 1)) + min;
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
 
 // Helper function to truncate strings to database column limits
 function truncateField(value, maxLength = 100) {
@@ -22,22 +18,17 @@ function truncateField(value, maxLength = 100) {
 }
 
 /**
- * Fetch and parse sitemap XML
+ * Fetch and parse a single sitemap XML; returns either page URLs or child sitemap URLs (for index).
  * @param {string} sitemapUrl - URL to sitemap
- * @returns {Promise<Array<string>>} - Array of URLs from sitemap
+ * @returns {Promise<{ type: 'urlset', urls: string[] } | { type: 'sitemapindex', sitemaps: string[] }>}
  */
-function fetchSitemap(sitemapUrl) {
+function fetchSitemapOnce(sitemapUrl) {
   return new Promise((resolve, reject) => {
     const url = new URL(sitemapUrl);
     const client = url.protocol === 'https:' ? https : http;
-    
     client.get(sitemapUrl, (res) => {
       let data = '';
-      
-      res.on('data', (chunk) => {
-        data += chunk;
-      });
-      
+      res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
         try {
           parseString(data, (err, result) => {
@@ -45,44 +36,60 @@ function fetchSitemap(sitemapUrl) {
               reject(err);
               return;
             }
-            
-            const urls = [];
-            
-            // Handle sitemap index (contains multiple sitemaps)
             if (result.sitemapindex && result.sitemapindex.sitemap) {
-              const sitemaps = result.sitemapindex.sitemap.map(s => s.loc[0]);
-              // For now, just return the first sitemap URL (can be enhanced to fetch all)
-              resolve(sitemaps);
+              const sitemaps = result.sitemapindex.sitemap.map(s => s.loc && s.loc[0]).filter(Boolean);
+              resolve({ type: 'sitemapindex', sitemaps });
               return;
             }
-            
-            // Handle regular sitemap (contains URLs)
             if (result.urlset && result.urlset.url) {
-              result.urlset.url.forEach(urlEntry => {
-                if (urlEntry.loc && urlEntry.loc[0]) {
-                  urls.push(urlEntry.loc[0]);
-                }
-              });
+              const urls = (result.urlset.url || [])
+                .map(u => u.loc && u.loc[0])
+                .filter(Boolean);
+              resolve({ type: 'urlset', urls });
+              return;
             }
-            
-            resolve(urls);
+            resolve({ type: 'urlset', urls: [] });
           });
         } catch (error) {
           reject(error);
         }
       });
-    }).on('error', (err) => {
-      reject(err);
-    });
+    }).on('error', reject);
   });
 }
 
+const SITEMAP_INDEX_MAX_DEPTH = 5;
+
 /**
- * Find sitemap URL for a website
- * @param {string} baseUrl - Base website URL
- * @returns {Promise<string|null>} - Sitemap URL or null if not found
+ * Fetch all page URLs from an XML sitemap (or sitemap index). Follows all child sitemaps.
+ * @param {string} sitemapUrl - URL to sitemap or sitemap index
+ * @param {number} depth - Current recursion depth (internal)
+ * @returns {Promise<string[]>} - Flat array of page URLs
  */
-async function findSitemap(baseUrl) {
+async function fetchAllUrlsFromSitemap(sitemapUrl, depth = 0) {
+  if (depth >= SITEMAP_INDEX_MAX_DEPTH) return [];
+  const result = await fetchSitemapOnce(sitemapUrl);
+  if (result.type === 'urlset') {
+    return result.urls;
+  }
+  const all = [];
+  for (const childUrl of result.sitemaps) {
+    try {
+      const childUrls = await fetchAllUrlsFromSitemap(childUrl, depth + 1);
+      all.push(...childUrls);
+    } catch (e) {
+      console.log(`Skipping child sitemap ${childUrl}: ${e.message}`);
+    }
+  }
+  return all;
+}
+
+/**
+ * Find XML sitemap URL(s) for a website (can return multiple from robots.txt).
+ * @param {string} baseUrl - Base website URL
+ * @returns {Promise<string[]|null>} - Array of sitemap URLs, or null if none found
+ */
+async function findSitemaps(baseUrl) {
   const commonSitemapPaths = [
     '/sitemap.xml',
     '/sitemap_index.xml',
@@ -91,40 +98,31 @@ async function findSitemap(baseUrl) {
     '/sitemap_1.xml',
     '/sitemap.txt'
   ];
-  
+
   try {
     const url = new URL(baseUrl);
     const base = `${url.protocol}//${url.host}`;
-    
-    // Try common sitemap locations
+
     for (const path of commonSitemapPaths) {
       try {
         const sitemapUrl = base + path;
-        const response = await new Promise((resolve, reject) => {
+        await new Promise((resolve, reject) => {
           const client = url.protocol === 'https:' ? https : http;
           const req = client.get(sitemapUrl, (res) => {
-            if (res.statusCode === 200) {
-              resolve(sitemapUrl);
-            } else {
-              reject(new Error(`Status ${res.statusCode}`));
-            }
+            if (res.statusCode === 200) resolve();
+            else reject(new Error(`Status ${res.statusCode}`));
           });
           req.on('error', reject);
-          req.setTimeout(5000, () => {
-            req.destroy();
-            reject(new Error('Timeout'));
-          });
+          req.setTimeout(5000, () => { req.destroy(); reject(new Error('Timeout')); });
         });
-        
-        return response;
+        return [sitemapUrl];
       } catch (e) {
-        // Continue to next path
+        // continue
       }
     }
-    
-    // Try robots.txt for sitemap reference
+
+    const robotsUrl = base + '/robots.txt';
     try {
-      const robotsUrl = base + '/robots.txt';
       const robotsContent = await new Promise((resolve, reject) => {
         const client = url.protocol === 'https:' ? https : http;
         const req = client.get(robotsUrl, (res) => {
@@ -133,24 +131,88 @@ async function findSitemap(baseUrl) {
           res.on('end', () => resolve(data));
         });
         req.on('error', reject);
-        req.setTimeout(5000, () => {
-          req.destroy();
-          reject(new Error('Timeout'));
-        });
+        req.setTimeout(5000, () => { req.destroy(); reject(new Error('Timeout')); });
       });
-      
-      const sitemapMatch = robotsContent.match(/Sitemap:\s*(.+)/i);
-      if (sitemapMatch && sitemapMatch[1]) {
-        return sitemapMatch[1].trim();
-      }
+      const lines = robotsContent.split(/\r?\n/).map(l => l.trim());
+      const sitemaps = lines
+        .filter(l => /^sitemap:\s+/i.test(l))
+        .map(l => l.replace(/^sitemap:\s+/i, '').trim())
+        .filter(Boolean);
+      if (sitemaps.length) return sitemaps;
     } catch (e) {
-      // robots.txt not found or error
+      // robots not found or error
     }
-    
+
     return null;
   } catch (error) {
     return null;
   }
+}
+
+/**
+ * Fetch page URLs from an HTML sitemap (page that lists links).
+ * @param {string} baseUrl - Base website URL (e.g. https://example.com)
+ * @returns {Promise<string[]>} - Array of same-domain page URLs found on HTML sitemap
+ */
+async function fetchUrlsFromHtmlSitemap(baseUrl) {
+  const base = baseUrl.replace(/\/$/, '');
+  const tryPaths = [
+    '/sitemap.html',
+    '/sitemap/',
+    '/sitemap/index.html',
+    '/page-sitemap.html',
+    '/html-sitemap.html',
+    '/sitemap_index.html'
+  ];
+  let html = '';
+  let resolvedBase = base;
+  try {
+    const url = new URL(baseUrl);
+    resolvedBase = `${url.protocol}//${url.host}`;
+  } catch (e) {
+    return [];
+  }
+  const client = resolvedBase.startsWith('https') ? https : http;
+
+  for (const path of tryPaths) {
+    try {
+      const sitemapUrl = resolvedBase + path;
+      html = await new Promise((resolve, reject) => {
+        const req = client.get(sitemapUrl, (res) => {
+          if (res.statusCode !== 200) {
+            reject(new Error(`Status ${res.statusCode}`));
+            return;
+          }
+          let data = '';
+          res.on('data', chunk => data += chunk);
+          res.on('end', () => resolve(data));
+        });
+        req.on('error', reject);
+        req.setTimeout(8000, () => { req.destroy(); reject(new Error('Timeout')); });
+      });
+      break;
+    } catch (e) {
+      html = '';
+    }
+  }
+  if (!html) return [];
+
+  const baseHost = new URL(resolvedBase).hostname.replace(/^www\./, '');
+  const urls = [];
+  const hrefRegex = /href\s*=\s*["']([^"']+)["']/gi;
+  let m;
+  while ((m = hrefRegex.exec(html)) !== null) {
+    let u = m[1].trim();
+    if (!u || u.startsWith('#') || u.startsWith('mailto:') || u.startsWith('tel:')) continue;
+    try {
+      if (u.startsWith('/')) u = resolvedBase + u;
+      else if (!u.startsWith('http')) u = resolvedBase + '/' + u;
+      const parsed = new URL(u);
+      const host = parsed.hostname.replace(/^www\./, '');
+      if (host === baseHost) urls.push(parsed.href.split('?')[0].replace(/\/$/, ''));
+    } catch (e) {}
+  }
+  return [...new Set(urls)];
 }
 
 function extractPhoneNumbers(text) {
@@ -210,6 +272,80 @@ function categorizePhoneNumbers(phones) {
  * @param {string} url - URL to normalize
  * @returns {string|null} - Normalized URL or null if invalid
  */
+/**
+ * Find "Contact us" / "Get in touch" etc. links on the current page (same origin only).
+ * Call when the page is already loaded (e.g. homepage or a result page).
+ * @param {import('playwright').Page} page - Playwright page (must be loaded)
+ * @param {string} baseUrl - Base URL for same-origin check
+ * @param {number} maxLinks - Max URLs to return
+ * @returns {Promise<string[]>} - Absolute URLs of contact-like links
+ */
+async function getContactLinkUrlsFromPage(page, baseUrl, maxLinks = 5) {
+  try {
+    const base = baseUrl.trim().startsWith('http') ? baseUrl : 'https://' + baseUrl;
+    const baseOrigin = new URL(base).origin;
+    const urls = await page.evaluate((origin, max) => {
+      const links = Array.from(document.querySelectorAll('a[href^="http"]'));
+      const contactLike = [];
+      const seen = new Set();
+      const patterns = [
+        'contact', 'get in touch', 'get-in-touch', 'reach us', 'reach-us',
+        'write to us', 'email us', 'call us', 'find us', 'get in touch',
+        'touch with us', 'contact us', 'contactus', 'getintouch'
+      ];
+      for (const a of links) {
+        const href = (a.getAttribute('href') || '').trim();
+        if (!href || href.length > 300) continue;
+        try {
+          const u = new URL(href);
+          if (u.origin !== origin) continue;
+        } catch (e) { continue; }
+        const text = (a.innerText || a.textContent || '').toLowerCase().trim().replace(/\s+/g, ' ');
+        const hrefLower = href.toLowerCase();
+        const match = patterns.some(p => text.includes(p) || hrefLower.includes(p.replace(/\s+/g, '-')));
+        if (match && !seen.has(href)) {
+          seen.add(href);
+          contactLike.push(href);
+        }
+      }
+      return contactLike.slice(0, max);
+    }, baseOrigin, maxLinks);
+    return Array.isArray(urls) ? urls : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+/**
+ * Build candidate URLs for the "Contact us" page from a base URL (same origin).
+ * Used as fallback when no contact links are found on the page.
+ * @param {string} baseUrl - Any URL on the site (e.g. homepage or search result URL)
+ * @returns {string[]} - List of URLs to try (contact, contact-us, etc.)
+ */
+function getContactPageUrls(baseUrl) {
+  try {
+    const u = new URL(baseUrl);
+    const origin = u.origin;
+    const pathWithoutFile = u.pathname.replace(/\/[^/]*$/, '') || '';
+    const basePath = pathWithoutFile.endsWith('/') ? pathWithoutFile : pathWithoutFile + '/';
+    const paths = [
+      '/contact',
+      '/contact-us',
+      '/contact_us',
+      '/contactus',
+      '/get-in-touch',
+      '/reach-us',
+      '/contact.html',
+      '/contact-us/',
+      '/contact/'
+    ];
+    const urls = paths.map((p) => origin + (p.startsWith('/') ? p : basePath + p));
+    return [...new Set(urls)];
+  } catch (e) {
+    return [];
+  }
+}
+
 function normalizeUrl(url) {
   if (!url || typeof url !== 'string') return null;
   
@@ -245,7 +381,7 @@ function normalizeUrl(url) {
  * @returns {Object|null} - Scraped data or null if failed
  */
 async function scrapeSingleWebsite(page, websiteUrl, options = {}) {
-  const { industry, keywords, maxPages = 50, useSitemap = true, checkCancellation = null } = options;
+  const { industry, keywords, maxPages = 500, useSitemap = true, checkCancellation = null } = options;
   
   try {
     const url = normalizeUrl(websiteUrl);
@@ -257,110 +393,105 @@ async function scrapeSingleWebsite(page, websiteUrl, options = {}) {
     // Collect all URLs to scrape
     let urlsToScrape = [url]; // Always include homepage
     
-    // Try to find and parse sitemap
+    // Try to find and parse XML and/or HTML sitemap (all pages)
     if (useSitemap) {
       try {
-        console.log(`Looking for sitemap for ${url}...`);
-        const sitemapUrl = await findSitemap(url);
-        
-        if (sitemapUrl) {
-          console.log(`Found sitemap: ${sitemapUrl}`);
-          const sitemapUrls = await fetchSitemap(sitemapUrl);
-          
-          // Filter URLs to same domain and limit count
-          const baseDomain = new URL(url).hostname;
-          const filteredUrls = sitemapUrls
-            .filter(sitemapUrl => {
-              try {
-                const sitemapDomain = new URL(sitemapUrl).hostname;
-                return sitemapDomain === baseDomain || sitemapDomain.replace('www.', '') === baseDomain.replace('www.', '');
-              } catch (e) {
-                return false;
-              }
-            })
-            .slice(0, maxPages - 1); // -1 because we already have homepage
-          
-          urlsToScrape = [url, ...filteredUrls];
-          console.log(`Will scrape ${urlsToScrape.length} pages from sitemap`);
+        console.log(`Looking for sitemap(s) for ${url}...`);
+        const baseDomain = new URL(url).hostname.replace(/^www\./, '');
+        const sameDomain = (u) => {
+          try {
+            const host = new URL(u).hostname.replace(/^www\./, '');
+            return host === baseDomain;
+          } catch (e) { return false; }
+        };
+
+        const xmlSitemaps = await findSitemaps(url);
+        let allPageUrls = [];
+        if (xmlSitemaps && xmlSitemaps.length) {
+          console.log(`Found ${xmlSitemaps.length} XML sitemap(s), fetching all pages...`);
+          for (const sitemapUrl of xmlSitemaps) {
+            try {
+              const pageUrls = await fetchAllUrlsFromSitemap(sitemapUrl);
+              allPageUrls.push(...pageUrls);
+            } catch (e) {
+              console.log(`Error fetching sitemap ${sitemapUrl}: ${e.message}`);
+            }
+          }
+        }
+        if (allPageUrls.length === 0) {
+          const htmlUrls = await fetchUrlsFromHtmlSitemap(url);
+          if (htmlUrls.length) {
+            console.log(`Found HTML sitemap: ${htmlUrls.length} page URLs`);
+            allPageUrls = htmlUrls;
+          }
+        }
+        if (allPageUrls.length) {
+          const filtered = [...new Set(allPageUrls)].filter(sameDomain).slice(0, maxPages - 1);
+          urlsToScrape = [url, ...filtered];
+          console.log(`Will scrape ${urlsToScrape.length} pages from sitemap(s)`);
         } else {
-          console.log(`No sitemap found for ${url}, using homepage + contact/about pages`);
+          urlsToScrape = [url];
+          console.log(`No sitemap found for ${url}, will use homepage and contact links from page (or guessed paths)`);
         }
       } catch (error) {
         console.log(`Sitemap error for ${url}: ${error.message}, falling back to homepage + contact/about`);
       }
     }
     
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await websiteDelay('init');
+
+    // When we only have the homepage (no sitemap), find Contact us links on the page first, else use guessed paths
+    if (urlsToScrape.length === 1) {
+      const baseDomain = new URL(url).hostname.replace(/^www\./, '');
+      const sameDomain = (u) => {
+        try { return new URL(u).hostname.replace(/^www\./, '') === baseDomain; } catch (e) { return false; }
+      };
+      const contactFromPage = await getContactLinkUrlsFromPage(page, url, 5);
+      if (contactFromPage.length) {
+        urlsToScrape = [url, ...contactFromPage.filter(sameDomain)];
+        console.log(`Found ${contactFromPage.length} contact link(s) on page, will scrape those`);
+      } else {
+        const guessed = getContactPageUrls(url).filter(sameDomain);
+        urlsToScrape = [url, ...guessed];
+        console.log(`No contact links on page, using homepage + ${guessed.length} guessed contact path(s)`);
+      }
+    }
+
     // Limit total pages
     if (urlsToScrape.length > maxPages) {
       urlsToScrape = urlsToScrape.slice(0, maxPages);
     }
     
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await randomSleep(2000, 3000);
-    
-    // Get company name
-    const companyName = await page.evaluate((pageUrl) => {
-      // Generic page titles to skip
-      const genericTitles = [
-        'contact us', 'contact', 'about', 'about us', 'home', 'welcome',
-        'get in touch', 'reach us', 'email us', 'phone', 'location',
-        'privacy policy', 'terms', 'terms of service', 'careers', 'jobs',
-        'blog', 'news', 'services', 'products', 'portfolio'
-      ];
-      
-      // Try structured data first (most reliable)
+    // Get company name: try ld+json first, then title + og:site_name + url via extractCompanyName
+    const pageMeta = await page.evaluate(() => {
       const ldJson = document.querySelector('script[type="application/ld+json"]');
+      let ldName = null;
       if (ldJson) {
         try {
           const data = JSON.parse(ldJson.textContent);
-          if (data.name && !genericTitles.includes(data.name.toLowerCase())) {
-            return data.name;
-          }
-          if (data.organization?.name && !genericTitles.includes(data.organization.name.toLowerCase())) {
-            return data.organization.name;
-          }
+          ldName = data.name || data.organization?.name || null;
         } catch (e) {}
       }
-      
-      // Try meta tags
       const ogSiteName = document.querySelector('meta[property="og:site_name"]');
-      if (ogSiteName?.content && !genericTitles.includes(ogSiteName.content.toLowerCase())) {
-        return ogSiteName.content;
-      }
-      
-      const ogTitle = document.querySelector('meta[property="og:title"]');
-      if (ogTitle?.content && ogTitle.content.length < 60 && !genericTitles.includes(ogTitle.content.toLowerCase())) {
-        return ogTitle.content;
-      }
-      
-      // Try h1 (but filter out generic text)
-      const h1 = document.querySelector('h1');
-      if (h1?.innerText?.trim() && h1.innerText.length < 100) {
-        const h1Text = h1.innerText.trim();
-        if (!genericTitles.includes(h1Text.toLowerCase())) {
-          return h1Text;
-        }
-      }
-      
-      // Fallback to title (but filter out generic text)
-      const title = document.title;
-      if (title) {
-        const titleText = title.split('|')[0].split('-')[0].split('—')[0].split('–')[0].trim();
-        if (!genericTitles.includes(titleText.toLowerCase())) {
-          return titleText;
-        }
-      }
-      
-      // Last resort: domain name
+      return {
+        ldName,
+        title: document.title || '',
+        ogSiteName: ogSiteName?.content?.trim() || null
+      };
+    });
+    const pageUrl = page.url();
+    let companyName = (pageMeta.ldName && !['contact us', 'contact', 'about', 'home', 'welcome'].includes(String(pageMeta.ldName).toLowerCase()))
+      ? pageMeta.ldName
+      : extractCompanyName({ title: pageMeta.title, url: pageUrl, ogSiteName: pageMeta.ogSiteName });
+    if (!companyName) {
       try {
-        const hostname = new URL(pageUrl).hostname;
-        const domainName = hostname.replace('www.', '').split('.')[0];
-        // Capitalize first letter
-        return domainName.charAt(0).toUpperCase() + domainName.slice(1);
+        const host = new URL(pageUrl).hostname.replace(/^www\./, '').split('.')[0];
+        companyName = host ? host.charAt(0).toUpperCase() + host.slice(1) : 'Unknown Company';
       } catch (e) {
-        return 'Unknown Company';
+        companyName = 'Unknown Company';
       }
-    }, url);
+    }
     
     // Clean up company name - remove generic suffixes
     let cleanedCompanyName = companyName;
@@ -372,6 +503,17 @@ async function scrapeSingleWebsite(page, websiteUrl, options = {}) {
         }
       });
     }
+
+    // Website source: Name = <title> or main <h1> only. Do NOT extract or save any person's name from body content.
+    const pageDisplayName = await page.evaluate(() => {
+      const title = (document.title || '').trim();
+      const titlePart = title ? title.split('|')[0].split('-')[0].split('—')[0].split('–')[0].trim() : '';
+      if (titlePart && titlePart.length < 150) return titlePart;
+      const h1 = document.querySelector('h1');
+      const h1Text = (h1?.innerText || '').trim();
+      if (h1Text && h1Text.length < 150) return h1Text;
+      return '';
+    });
     
     // Get meta description
     const metaDescription = await page.evaluate(() => {
@@ -404,7 +546,7 @@ async function scrapeSingleWebsite(page, websiteUrl, options = {}) {
       
       for (let i = 1; i < urlsToScrape.length; i++) { // Start from 1 (skip homepage, already done)
         // Check for cancellation before each page
-        if (checkCancellation()) {
+        if (checkCancellation && checkCancellation()) {
           progressCallback({ 
             status: 'Scraping cancelled by user', 
             cancelled: true
@@ -416,7 +558,7 @@ async function scrapeSingleWebsite(page, websiteUrl, options = {}) {
         
         try {
           await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
-          await randomSleep(1500, 2500);
+          await websiteDelay('betweenPages');
           
           const pageText = await page.evaluate(() => document.body.innerText || '');
           const pageHtml = await page.evaluate(() => document.body.innerHTML || '');
@@ -479,7 +621,7 @@ async function scrapeSingleWebsite(page, websiteUrl, options = {}) {
       if (links.contactLinks.length > 0) {
         try {
           await page.goto(links.contactLinks[0], { waitUntil: 'domcontentloaded', timeout: 20000 });
-          await randomSleep(1500, 2500);
+          await websiteDelay('betweenPages');
           
           const contactText = await page.evaluate(() => document.body.innerText || '');
           const contactHtml = await page.evaluate(() => document.body.innerHTML || '');
@@ -518,18 +660,17 @@ async function scrapeSingleWebsite(page, websiteUrl, options = {}) {
     
     // Extract contact information
     const phones = extractPhoneNumbers(allText);
-    // Use centralized email extractor with business email filtering
     const allEmails = extractEmails(allText, allHtml);
-    const emails = filterBusinessEmails(allEmails); // Only business emails
+    const emails = filterBusinessEmails(allEmails).slice(0, 2); // max 2 emails per website
+    const mailtoEmails = extractMailtoEmails(allHtml);
     const { landlines, mobiles } = categorizePhoneNumbers(phones);
+    // Prefer mailto: and contact/info/sales to reduce bounces
+    const primaryEmail = getBestEmail(emails.length ? emails : allEmails, { mailtoEmails }) || null;
     
-    // Get best email (prioritizes business emails)
-    const primaryEmail = getBestEmail(allEmails) || null;
-    
-    // Build contact record
+    // Build contact record (website source: name from title/h1 only, not scraped person name)
     const contactData = {
       company: truncateField(cleanedCompanyName || companyName, 100),
-      first_name: truncateField(companyName, 100),
+      first_name: truncateField(pageDisplayName || '', 100),
       last_name: '',
       email: primaryEmail,
       phone_number: landlines[0] || null,
@@ -563,78 +704,37 @@ async function scrapeSingleWebsite(page, websiteUrl, options = {}) {
 // SINGLE WEBSITE SCRAPER (Original function - backward compatible)
 // ============================================
 
-async function runWebsiteScraper(websiteUrl, industry = null, keywords = null, progressCallback, options = {}) {
+/**
+ * @param {Object} config - { websiteUrl, industry, keywords }
+ * @param {Function} progressCallback - Progress callback (counts/phase only)
+ * @param {Object} options - { checkCancellation }
+ */
+async function runWebsiteScraper(config, progressCallback, options = {}) {
+  const { websiteUrl, industry = null, keywords = null } = config || {};
   const checkCancellation = options.checkCancellation || (() => false);
-  // If array is passed, use bulk scraper
-  if (Array.isArray(websiteUrl)) {
-    return runBulkWebsiteScraper(websiteUrl, industry, keywords, progressCallback, options);
+  if (Array.isArray(websiteUrl) || (typeof websiteUrl === 'string' && (websiteUrl.includes(',') || websiteUrl.includes('\n')))) {
+    return runBulkWebsiteScraper(config, progressCallback, options);
   }
-  
   const scrapedData = [];
   let browser;
-  
   try {
     progressCallback({ status: 'Launching browser...', profilesFound: 0, profilesScraped: 0 });
-    
-    browser = await launchBrowser({
-      headless: false,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
-    });
-    
-    const context = await browser.newContext({
-      viewport: { width: 1400, height: 900 },
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    });
-    
+    browser = await launchBrowser({ headless: false, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    const context = await browser.newContext({ viewport: { width: 1400, height: 900 }, userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' });
     const page = await context.newPage();
     page.setDefaultTimeout(30000);
-    
     progressCallback({ status: `Scraping ${websiteUrl}...`, profilesFound: 1, profilesScraped: 0 });
-    
     const result = await scrapeSingleWebsite(page, websiteUrl, { industry, keywords });
-    
     if (result) {
-      // Remove internal fields before saving
       const { _allEmails, _allPhones, ...cleanResult } = result;
       scrapedData.push(cleanResult);
-      
-      // Save to Supabase
-      if (cleanResult.email || cleanResult.phone_number || cleanResult.mobile_number) {
-        let dbResult;
-        if (cleanResult.email) {
-          dbResult = await supabase
-            .from('contacts')
-            .upsert(cleanResult, { onConflict: 'email' });
-        } else {
-          dbResult = await supabase
-            .from('contacts')
-            .insert(cleanResult);
-        }
-        
-        if (dbResult.error) {
-          console.error('Supabase error:', dbResult.error);
-        }
-      }
-      
       const summary = `Found ${_allEmails?.length || 0} email(s), ${_allPhones?.length || 0} phone(s)`;
-      progressCallback({ 
-        status: `Complete! ${summary}`, 
-        profilesFound: 1, 
-        profilesScraped: 1,
-        completed: true
-      });
+      progressCallback({ status: `Complete! ${summary}`, profilesFound: 1, profilesScraped: 1, completed: true });
     } else {
-      progressCallback({ 
-        status: 'No contact information found.', 
-        profilesFound: 1, 
-        profilesScraped: 0,
-        completed: true
-      });
+      progressCallback({ status: 'No contact information found.', profilesFound: 1, profilesScraped: 0, completed: true });
     }
-    
-    await randomSleep(300, 500); // Reduced final delay
+    await websiteDelay('final');
     await browser.close();
-    
     return scrapedData;
     
   } catch (error) {
@@ -654,27 +754,25 @@ async function runWebsiteScraper(websiteUrl, industry = null, keywords = null, p
 // ============================================
 
 /**
- * Scrape multiple websites at once
- * @param {string|string[]} websiteUrls - Single URL, comma-separated URLs, or array of URLs
- * @param {string} industry - Industry category
- * @param {string} keywords - Keywords for tagging
- * @param {Function} progressCallback - Progress callback function
- * @returns {Array} - Array of scraped contact data
+ * @param {Object} config - { websiteUrl (string or array), industry, keywords, isBulk }
+ * @param {Function} progressCallback - Progress callback (counts/phase only)
+ * @param {Object} options - { checkCancellation }
  */
-async function runBulkWebsiteScraper(websiteUrls, industry = null, keywords = null, progressCallback) {
+async function runBulkWebsiteScraper(config, progressCallback, options = {}) {
+  const { websiteUrl: websiteUrls, industry = null, keywords = null } = config || {};
+  const checkCancellation = options.checkCancellation || (() => false);
   const scrapedData = [];
   let browser;
-  
-  // Parse URLs - handle string (comma/newline separated) or array
   let urls = [];
   if (typeof websiteUrls === 'string') {
-    // Split by comma, newline, semicolon, or space
-    urls = websiteUrls
-      .split(/[,;\n\r]+/)
-      .map(url => url.trim())
-      .filter(url => url.length > 0);
+    // Split by newlines only so URLs with commas (e.g. query params) are not broken; support \r\n and \n
+    urls = websiteUrls.split(/\r?\n/).map(url => url.trim()).filter(url => url.length > 0);
+    // Also allow comma/semicolon-separated if user pasted that (single line)
+    if (urls.length === 1 && (urls[0].includes(',') || urls[0].includes(';'))) {
+      urls = urls[0].split(/[,;]+/).map(u => u.trim()).filter(Boolean);
+    }
   } else if (Array.isArray(websiteUrls)) {
-    urls = websiteUrls.map(url => url.trim()).filter(url => url.length > 0);
+    urls = websiteUrls.map(url => (typeof url === 'string' ? url : '').trim()).filter(url => url.length > 0);
   }
   
   // Normalize and validate all URLs
@@ -721,30 +819,19 @@ async function runBulkWebsiteScraper(websiteUrls, industry = null, keywords = nu
     const failedScrapes = [];
     
     for (let i = 0; i < uniqueUrls.length; i++) {
+      if (checkCancellation()) {
+        progressCallback({ status: 'Scraping cancelled by user', profilesFound: uniqueUrls.length, profilesScraped: scrapedData.length, cancelled: true });
+        break;
+      }
       const url = uniqueUrls[i];
       const displayUrl = url.replace('https://', '').replace('http://', '').substring(0, 40);
-      
-      progressCallback({ 
-        status: `Scraping ${i + 1}/${uniqueUrls.length}: ${displayUrl}...`, 
-        profilesFound: uniqueUrls.length, 
-        profilesScraped: scrapedData.length,
-        phase: 'scraping',
-        currentUrl: url
-      });
-      
+      progressCallback({ status: `Scraping ${i + 1}/${uniqueUrls.length}: ${displayUrl}...`, profilesFound: uniqueUrls.length, profilesScraped: scrapedData.length, phase: 'scraping' });
       try {
         const result = await scrapeSingleWebsite(page, url, { industry, keywords });
-        
         if (result) {
-          // Remove internal fields
           const { _allEmails, _allPhones, ...cleanResult } = result;
           scrapedData.push(cleanResult);
-          successfulScrapes.push({
-            url,
-            company: cleanResult.company,
-            hasEmail: !!cleanResult.email,
-            hasPhone: !!(cleanResult.phone_number || cleanResult.mobile_number)
-          });
+          successfulScrapes.push({ url, company: cleanResult.company, hasEmail: !!cleanResult.email, hasPhone: !!(cleanResult.phone_number || cleanResult.mobile_number) });
         } else {
           failedScrapes.push({ url, reason: 'No data extracted' });
         }
@@ -752,74 +839,13 @@ async function runBulkWebsiteScraper(websiteUrls, industry = null, keywords = nu
         console.log(`Failed to scrape ${url}: ${error.message}`);
         failedScrapes.push({ url, reason: error.message });
       }
-      
-      // Reduced delay between websites (still need some to avoid rate limiting)
-      if (i < uniqueUrls.length - 1) {
-        await randomSleep(800, 1500); // Reduced but still safe
-      }
+      if (i < uniqueUrls.length - 1) await websiteDelay('betweenSites');
     }
-    
-    // Save all results to database
-    if (scrapedData.length > 0) {
-      progressCallback({ 
-        status: `Saving ${scrapedData.length} contacts to database...`, 
-        profilesFound: uniqueUrls.length, 
-        profilesScraped: scrapedData.length,
-        phase: 'saving'
-      });
-      
-      // Separate records with and without email
-      const withEmail = scrapedData.filter(r => r.email);
-      const withoutEmail = scrapedData.filter(r => !r.email && (r.phone_number || r.mobile_number));
-      
-      // Upsert records with email
-      if (withEmail.length > 0) {
-        const { error: upsertError } = await supabase
-          .from('contacts')
-          .upsert(withEmail, { onConflict: 'email' });
-        
-        if (upsertError) {
-          console.error('Supabase upsert error:', upsertError);
-        }
-      }
-      
-      // Insert records without email (but have phone)
-      if (withoutEmail.length > 0) {
-        const { error: insertError } = await supabase
-          .from('contacts')
-          .insert(withoutEmail);
-        
-        if (insertError) {
-          console.error('Supabase insert error:', insertError);
-        }
-      }
-      
-      console.log(`Saved ${withEmail.length + withoutEmail.length} contacts (${withEmail.length} with emails)`);
-    }
-    
-    // Calculate stats
     const emailCount = scrapedData.filter(r => r.email).length;
     const phoneCount = scrapedData.filter(r => r.phone_number || r.mobile_number).length;
-    
-    progressCallback({ 
-      status: `Complete! Scraped ${scrapedData.length}/${uniqueUrls.length} websites. ${emailCount} emails, ${phoneCount} phones found.`, 
-      profilesFound: uniqueUrls.length, 
-      profilesScraped: scrapedData.length,
-      phase: 'complete',
-      completed: true,
-      stats: {
-        total: uniqueUrls.length,
-        successful: scrapedData.length,
-        failed: failedScrapes.length,
-        withEmail: emailCount,
-        withPhone: phoneCount
-      },
-      failedUrls: failedScrapes
-    });
-    
-    await randomSleep(300, 500); // Reduced final delay
+    progressCallback({ status: `Complete! Scraped ${scrapedData.length}/${uniqueUrls.length} websites. ${emailCount} emails, ${phoneCount} phones found.`, profilesFound: uniqueUrls.length, profilesScraped: scrapedData.length, phase: 'complete', completed: true, stats: { total: uniqueUrls.length, successful: scrapedData.length, failed: failedScrapes.length, withEmail: emailCount, withPhone: phoneCount }, failedUrls: failedScrapes });
+    await websiteDelay('final');
     await browser.close();
-    
     return scrapedData;
     
   } catch (error) {
@@ -835,7 +861,12 @@ async function runBulkWebsiteScraper(websiteUrls, industry = null, keywords = nu
   }
 }
 
-module.exports = { 
+module.exports = {
+  findSitemaps,
+  fetchAllUrlsFromSitemap,
+  fetchUrlsFromHtmlSitemap,
+  getContactPageUrls,
+  getContactLinkUrlsFromPage,
   runWebsiteScraper,
   runBulkWebsiteScraper
 };

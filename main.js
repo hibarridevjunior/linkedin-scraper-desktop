@@ -1,14 +1,32 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const https = require('https');
+
+// Load .env from app directory (for clean build: set SUPABASE_URL + SUPABASE_KEY to a new empty project)
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const nodemailer = require('nodemailer');
+const { verifyEmailSmtp, verifyEmailMxSyntax } = require('./src/smtp-verifier');
+
+// Prevent ECONNRESET and other network errors from crashing the app
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception in main process:', err);
+  const msg = (err && err.message) ? err.message : String(err);
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
+    mainWindow.webContents.send('main-error', { message: msg, code: err.code || null });
+  }
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled rejection in main process:', reason);
+});
 
 let mainWindow;
 let scraperWindow;
 
-// Supabase config (centralized)
-const SUPABASE_URL = 'https://cvecdppmqcxgofetrfir.supabase.co';
-const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN2ZWNkcHBtcWN4Z29mZXRyZmlyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc1ODQ3NDYsImV4cCI6MjA4MzE2MDc0Nn0.GjF5fvkdeDo8kjso3RxQTVEroMO6-hideVgPAYWDyvc';
+// Supabase config: set SUPABASE_URL + SUPABASE_KEY to a new empty project for a "clean"
+// distribution (all nav counts 0). If unset, uses the default project below.
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://cvecdppmqcxgofetrfir.supabase.co';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN2ZWNkcHBtcWN4Z29mZXRyZmlyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc1ODQ3NDYsImV4cCI6MjA4MzE2MDc0Nn0.GjF5fvkdeDo8kjso3RxQTVEroMO6-hideVgPAYWDyvc';
 
 function getSupabase() {
   const { createClient } = require('@supabase/supabase-js');
@@ -55,7 +73,111 @@ function createScraperWindow() {
   });
 }
 
-app.whenReady().then(createWindow);
+const salesNavReceiver = require('./src/sales-nav-receiver');
+
+function onSalesNavRefresh() {
+  if (mainWindow && mainWindow.webContents) mainWindow.webContents.send('refresh-data');
+}
+
+async function saveExtensionContactsToSupabase(contacts) {
+  if (!contacts || contacts.length === 0) return;
+  const supabase = getSupabase();
+  const withLinkedInUrl = contacts.filter(c => c && c.linkedin_url);
+  const withoutLinkedInUrl = contacts.filter(c => c && !c.linkedin_url);
+
+  try {
+    // Merge by linkedin_url without requiring a unique constraint: fetch existing, then update or insert
+    if (withLinkedInUrl.length > 0) {
+      const urls = [...new Set(withLinkedInUrl.map(c => c.linkedin_url.trim()).filter(Boolean))];
+      const existingByUrl = new Map();
+      const BATCH = 100;
+      for (let i = 0; i < urls.length; i += BATCH) {
+        const chunk = urls.slice(i, i + BATCH);
+        const { data: rows, error: selectErr } = await supabase.from('contacts').select('id, linkedin_url').in('linkedin_url', chunk);
+        if (selectErr) throw new Error('Select existing: ' + (selectErr.message || selectErr));
+        if (rows && rows.length) rows.forEach(r => { if (r.linkedin_url) existingByUrl.set(r.linkedin_url, r.id); });
+      }
+      const toUpdate = withLinkedInUrl.filter(c => existingByUrl.has(c.linkedin_url));
+      const toInsert = withLinkedInUrl.filter(c => !existingByUrl.has(c.linkedin_url));
+      for (const c of toUpdate) {
+        const id = existingByUrl.get(c.linkedin_url);
+        const { error } = await supabase.from('contacts').update(c).eq('id', id);
+        if (error) {
+          if (error.code === '23505' && error.message && error.message.includes('email')) {
+            const { error: err2 } = await supabase.from('contacts').update({ ...c, email: null }).eq('id', id);
+            if (err2) console.error('[Sales Nav receiver] Update (no email) failed:', err2.message);
+          } else {
+            throw new Error('Update: ' + (error.message || error));
+          }
+        }
+      }
+      if (toInsert.length > 0) {
+        const seenEmail = new Set();
+        const deduped = toInsert.map(c => {
+          if (c.email && seenEmail.has(c.email.toLowerCase())) {
+            return { ...c, email: null };
+          }
+          if (c.email) seenEmail.add(c.email.toLowerCase());
+          return c;
+        });
+        const withEmail = deduped.filter(c => c && c.email);
+        const withoutEmail = deduped.filter(c => c && !c.email);
+        if (withEmail.length > 0) {
+          const { error } = await supabase.from('contacts').upsert(withEmail, { onConflict: 'email', ignoreDuplicates: false });
+          if (error) throw new Error('Upsert: ' + (error.message || error));
+        }
+        if (withoutEmail.length > 0) {
+          const { error } = await supabase.from('contacts').insert(withoutEmail);
+          if (error) throw new Error('Insert: ' + (error.message || error));
+        }
+      }
+    }
+
+    if (withoutLinkedInUrl.length > 0) {
+      const withEmail = withoutLinkedInUrl.filter(c => c && c.email);
+      const withoutEmail = withoutLinkedInUrl.filter(c => c && !c.email);
+      if (withEmail.length > 0) {
+        const { error } = await supabase.from('contacts').upsert(withEmail, { onConflict: 'email', ignoreDuplicates: false });
+        if (error) throw new Error('Upsert (no url): ' + (error.message || error));
+      }
+      if (withoutEmail.length > 0) {
+        const { error } = await supabase.from('contacts').insert(withoutEmail);
+        if (error) throw new Error('Insert (no url): ' + (error.message || error));
+      }
+    }
+
+    console.log('[Sales Nav receiver] Saved ' + contacts.length + ' contacts to Supabase.');
+  } catch (err) {
+    console.error('[Sales Nav receiver] Save failed:', err && err.message ? err.message : err);
+    throw err;
+  }
+}
+
+async function updateContactByLinkedInUrl(linkedinUrl, updates) {
+  if (!linkedinUrl || typeof linkedinUrl !== 'string') return { data: null, error: new Error('Missing linkedin_url') };
+  const supabase = getSupabase();
+  let { data, error } = await supabase
+    .from('contacts')
+    .update(updates)
+    .eq('linkedin_url', linkedinUrl.trim())
+    .select();
+  if (error && error.code === '23505' && updates.email && String(error.message || '').includes('email')) {
+    const { email, ...rest } = updates;
+    const res = await supabase
+      .from('contacts')
+      .update(rest)
+      .eq('linkedin_url', linkedinUrl.trim())
+      .select();
+    if (!res.error) return { data: res.data, error: null };
+  }
+  if (error) console.error('[Sales Nav receiver] Update by linkedin_url error:', error);
+  return { data, error };
+}
+
+app.whenReady().then(() => {
+  createWindow();
+  salesNavReceiver.startSalesNavReceiver(getSupabase, saveExtensionContactsToSupabase, onSalesNavRefresh, updateContactByLinkedInUrl);
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
@@ -74,290 +196,288 @@ ipcMain.on('open-scraper', () => {
 });
 
 // ============================================
-// SCRAPING - Enhanced with enrichment & bulk support
+// SCRAPING - Job queue, runner, progress store (~500 leads/day)
 // ============================================
 
-// Global cancellation flag for scraping operations
-let scrapingCancelled = false;
+const progressStore = require('./src/progress-store');
+const searchHistoryStore = require('./src/search-history-store');
+const { buildEmailScraperJobs, mergeContacts } = require('./src/email-scraper-service');
+const { BETWEEN_JOBS_MS, sleep } = require('./src/cooldown-config');
 
-// Reset cancellation flag when starting a new scrape
+// Global cancellation flag — cooperative cancellation; runner checks between jobs
+let scrapingCancelled = false;
+let scrapingStopMode = null; // 'slow' | 'fast' | null; slow = save with emails, fast = save without emails/profiles
+
 function resetCancellationFlag() {
   scrapingCancelled = false;
+  scrapingStopMode = null;
 }
 
-// Check if scraping should be cancelled
 function isScrapingCancelled() {
   return scrapingCancelled;
 }
 
-// Export cancellation check for use in scrapers (via require)
+function getScrapingStopMode() {
+  return scrapingStopMode;
+}
+
 global.isScrapingCancelled = isScrapingCancelled;
 
-ipcMain.handle('stop-scrape', async (event) => {
+ipcMain.handle('stop-scrape', async (event, mode) => {
   scrapingCancelled = true;
-  console.log('Scraping cancellation requested');
-  return { success: true, message: 'Scraping will stop after current operation' };
+  scrapingStopMode = mode === 'fast' ? 'fast' : 'slow';
+  const msg = mode === 'fast'
+    ? 'Fast stop — saving leads without emails or LinkedIn profiles'
+    : 'Stopping after current operation — all contacts collected so far will be saved (with emails)';
+  console.log('[stop-scrape]', msg);
+  return { success: true, message: msg };
 });
+
+// IPC progress: only counts, phase, source, cancelled/completed — no contact arrays, no Playwright refs
+function sendProgress(progress, jobsCompleted, jobsTotal, contactsCollected) {
+  const payload = {
+    status: progress.status || '',
+    phase: progress.phase || 'init',
+    source: progress.source || null,
+    profilesFound: progress.profilesFound ?? 0,
+    profilesScraped: progress.profilesScraped ?? 0,
+    cancelled: !!progress.cancelled,
+    completed: !!progress.completed,
+    error: !!progress.error
+  };
+  if (progress.stats && typeof progress.stats === 'object') {
+    payload.stats = { total: progress.stats.total ?? 0, withEmail: progress.stats.withEmail ?? 0, withPhone: progress.stats.withPhone ?? 0 };
+  }
+  if (jobsTotal != null) payload.jobsTotal = jobsTotal;
+  if (jobsCompleted != null) payload.jobsCompleted = jobsCompleted;
+  if (contactsCollected != null) payload.contactsCollected = contactsCollected;
+  if (progress.failedUrls) payload.failedUrls = progress.failedUrls;
+  if (progress.estimatedSecondsRemaining != null) payload.estimatedSecondsRemaining = progress.estimatedSecondsRemaining;
+  if (scraperWindow) scraperWindow.webContents.send('scrape-progress', payload);
+}
+
+// Build queue for start-scrape (single job) or start-email-scrape (buildEmailScraperJobs)
+function buildQueue(config) {
+  if (config.type === 'emailscraper') {
+    return buildEmailScraperJobs({ query: config.query, sources: config.sources || {}, maxResultsPerSource: config.maxResultsPerSource || 20, industry: config.industry || null, keywords: config.keywords || null });
+  }
+  if (config.type === 'linkedin') {
+    return [{ type: 'linkedin', config: { searchMode: config.searchMode || (config.keywords && config.keywords.trim() ? 'keyword' : 'company'), companyName: config.companyName || '', companyDomain: config.companyDomain || '', maxProfiles: config.maxProfiles || 20, jobTitles: config.jobTitles || [], industry: config.industry || null, keywords: config.keywords || null, location: config.location || null, jobTitle: config.jobTitle || null, company: config.company || null } }];
+  }
+  if (config.type === 'googlemaps') {
+    return [{ type: 'google_maps', config: { searchQuery: config.searchQuery, maxResults: config.maxResults || 50, industry: config.industry || null, keywords: config.keywords || null, enableEnrichment: config.enableEnrichment !== false } }];
+  }
+  if (config.type === 'website') {
+    return [{ type: 'website', config: { websiteUrl: config.websiteUrl, industry: config.industry || null, keywords: config.keywords || null, isBulk: !!config.isBulk } }];
+  }
+  return [];
+}
+
+// Build a short label for Search History from job type and config
+function getSearchHistoryLabel(job) {
+  const { type, config } = job || {};
+  const c = config || {};
+  switch (type) {
+    case 'linkedin':
+      return (c.keywords || c.companyName || 'LinkedIn search').toString().trim() || 'LinkedIn search';
+    case 'google_maps':
+      return (c.searchQuery || 'Google Maps').toString().trim().substring(0, 120) || 'Google Maps';
+    case 'google_search':
+      return (c.originalQuery || c.searchQuery || c.query || 'Google Search').toString().trim().substring(0, 120) || 'Google Search';
+    case 'website': {
+      const url = c.websiteUrl;
+      if (Array.isArray(url)) {
+        return url.length > 1 ? `Websites (${url.length} URLs)` : (url[0] || 'Websites').toString().substring(0, 80);
+      }
+      const str = (url || '').toString().trim();
+      const lines = str.split(/\r?\n/).filter(Boolean);
+      if (lines.length > 1) return `Websites (${lines.length} URLs)`;
+      return str.substring(0, 80) || 'Websites';
+    }
+    default:
+      return (c.searchQuery || c.query || type || 'Search').toString().trim().substring(0, 120) || 'Search';
+  }
+}
+
+// Run one job — per-job browser lifecycle; scraper returns contacts; cancellation check passed in
+async function runOneJob(job, progressCallback) {
+  const { type, config } = job;
+  const options = { checkCancellation: isScrapingCancelled, stopMode: getScrapingStopMode() };
+  if (type === 'linkedin') {
+    const { runLinkedInScraper } = require('./src/scraper');
+    return await runLinkedInScraper(config, progressCallback, options);
+  }
+  if (type === 'google_search') {
+    const { runGoogleSearchScraper } = require('./src/google-search-scraper');
+    return await runGoogleSearchScraper(config, progressCallback, options);
+  }
+  if (type === 'google_maps') {
+    const { runGoogleMapsScraper } = require('./src/googlemaps-scraper');
+    return await runGoogleMapsScraper(config, progressCallback, options);
+  }
+  if (type === 'website') {
+    const { runWebsiteScraper, runBulkWebsiteScraper } = require('./src/website-scraper');
+    if (config.isBulk || (typeof config.websiteUrl === 'string' && (config.websiteUrl.includes(',') || config.websiteUrl.includes('\n')))) {
+      return await runBulkWebsiteScraper(config, progressCallback, options);
+    }
+    return await runWebsiteScraper(config, progressCallback, options);
+  }
+  return [];
+}
+
+/** @returns {{ saved: number, error?: string }} */
+async function saveContactsToSupabase(contacts) {
+  if (!contacts || contacts.length === 0) return { saved: 0 };
+  const supabase = getSupabase();
+  const withEmail = contacts.filter(c => c && c.email);
+  const withoutEmail = contacts.filter(c => c && !c.email);
+  let saved = 0;
+  let saveError = null;
+  if (withEmail.length > 0) {
+    const { error } = await supabase.from('contacts').upsert(withEmail, { onConflict: 'email', ignoreDuplicates: false });
+    if (error) {
+      console.error('Supabase save error (with email):', error);
+      saveError = saveError || (error.message || String(error));
+    } else {
+      saved += withEmail.length;
+    }
+  }
+  if (withoutEmail.length > 0) {
+    const { error } = await supabase.from('contacts').insert(withoutEmail);
+    if (error) {
+      console.error('Supabase save error (no email):', error);
+      saveError = saveError || (error.message || String(error));
+    } else {
+      saved += withoutEmail.length;
+    }
+  }
+  return { saved, error: saveError || undefined };
+}
+
+async function runLoop(initialQueue, configSummary, isEmailScraper) {
+  let queue = [...initialQueue];
+  const jobsTotal = queue.length;
+  let jobsCompleted = 0;
+  let allContacts = [];
+  let stats = null;
+  let failedUrls = null;
+  const runId = 'run-' + Date.now();
+  progressStore.save({ runId, queue, configSummary, counts: { contactsCollected: 0 }, lastUpdated: Date.now() });
+
+  const progressCallback = (progress) => {
+    if (isScrapingCancelled()) { progress.cancelled = true; progress.status = 'Stopping...'; }
+    if (progress.stats) stats = progress.stats;
+    if (progress.failedUrls) failedUrls = progress.failedUrls;
+    sendProgress(progress, jobsCompleted, jobsTotal, allContacts.length);
+  };
+
+  while (queue.length > 0 && !isScrapingCancelled()) {
+    const job = queue.shift();
+    try {
+      const contacts = await runOneJob(job, progressCallback);
+      const list = Array.isArray(contacts) ? contacts : (contacts ? [contacts] : []);
+      allContacts = allContacts.concat(list);
+      // Tag contacts with search_run_id and record in Search History (all job types; one entry per job so "View leads" shows only this job's contacts)
+      if (list.length > 0) {
+        const jobRunId = `${runId}-${jobsCompleted}`;
+        const { columnExists } = await ensureSearchRunIdColumn();
+        if (columnExists) {
+          list.forEach(c => { c.search_run_id = jobRunId; });
+        }
+        const label = getSearchHistoryLabel(job);
+        searchHistoryStore.append(jobRunId, label, list.length, job.type || null);
+      }
+      // Save after each job (and on stop: current job returns partial list, we save it here)
+      const saveResult = await saveContactsToSupabase(list);
+      if (saveResult.error && mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
+        mainWindow.webContents.send('contacts-save-error', { message: saveResult.error });
+      }
+      jobsCompleted++;
+      progressStore.save({ runId, queue, configSummary, counts: { contactsCollected: allContacts.length }, lastUpdated: Date.now() });
+      sendProgress({ status: 'Job ' + jobsCompleted + '/' + jobsTotal + ' done.', phase: 'complete', completed: false }, jobsCompleted, jobsTotal, allContacts.length);
+    } catch (err) {
+      console.error('Job error:', err);
+      sendProgress({ status: 'Error: ' + err.message, phase: 'error', error: true }, jobsCompleted, jobsTotal, allContacts.length);
+    }
+    if (queue.length > 0 && !isScrapingCancelled()) await sleep(BETWEEN_JOBS_MS);
+  }
+  progressStore.clear();
+  // On cancel we still merge/save what we have so far (already saved per-job above; merge dedupes for email scraper)
+  if (isEmailScraper && allContacts.length > 0) {
+    const merged = mergeContacts(allContacts);
+    const mergeSaveResult = await saveContactsToSupabase(merged);
+    if (mergeSaveResult.error && mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
+      mainWindow.webContents.send('contacts-save-error', { message: mergeSaveResult.error });
+    }
+    stats = { total: merged.length, withEmail: merged.filter(c => c.email).length, withPhone: merged.filter(c => c.phone_number || c.mobile_number).length };
+    allContacts = merged;
+  } else if (!stats && allContacts.length > 0) {
+    stats = { total: allContacts.length, withEmail: allContacts.filter(r => r.email).length, withPhone: allContacts.filter(r => r.phone_number || r.mobile_number || r.whatsapp_number).length };
+  }
+  console.log('[runLoop] Returning:', { resultsCount: allContacts.length, stats, hasFailedUrls: !!failedUrls, cancelled: isScrapingCancelled() });
+  if (allContacts.length > 0) {
+    console.log('[runLoop] First contact sample:', allContacts[0]);
+  }
+  return { results: allContacts, stats, failedUrls, cancelled: isScrapingCancelled() };
+}
 
 ipcMain.handle('start-scrape', async (event, config) => {
   resetCancellationFlag();
+  const queue = buildQueue(config);
+  if (queue.length === 0) return { success: false, error: 'No jobs to run' };
+  const configSummary = { type: config.type };
   try {
-    let results;
-    let stats = null;
-    let failedUrls = null;
-    
-    // Progress callback helper - captures stats and failed URLs
-    const progressCallback = (progress) => {
-      // Check if cancellation was requested
-      if (isScrapingCancelled()) {
-        progress.status = 'Stopping...';
-        progress.cancelled = true;
-      }
-      
-      if (scraperWindow) {
-        scraperWindow.webContents.send('scrape-progress', progress);
-      }
-      if (progress.stats) {
-        stats = progress.stats;
-      }
-      if (progress.failedUrls) {
-        failedUrls = progress.failedUrls;
-      }
-      // Don't overwrite results from progress callback - use direct return value instead
-      // if (progress.results) {
-      //   results = progress.results;
-      // }
-    };
-    
-    if (config.type === 'linkedin') {
-      const { runLinkedInScraper } = require('./src/scraper');
-      const searchMode = config.searchMode || 'company';
-      
-      // Wrap progress callback to include cancellation check
-      const progressWithCancellation = (progress) => {
-        if (isScrapingCancelled()) {
-          progress.cancelled = true;
-          progress.status = 'Stopping...';
-        }
-        progressCallback(progress);
-      };
-      
-      results = await runLinkedInScraper(
-        config.companyName || '',
-        config.companyDomain || '',
-        config.maxProfiles,
-        config.jobTitles,
-        config.industry || null,
-        config.keywords || null,
-        progressWithCancellation,
-        searchMode,
-        isScrapingCancelled, // Pass cancellation check function
-        config.location || null // Pass location
-      );
-    } else if (config.type === 'googlemaps') {
-      const { runGoogleMapsScraper } = require('./src/googlemaps-scraper');
-      
-      // Build options object for enhanced scraper
-      const options = {
-        enableEnrichment: config.enableEnrichment !== false,
-        checkCancellation: isScrapingCancelled // Pass cancellation check
-      };
-      
-      // Wrap progress callback to include cancellation check
-      const progressWithCancellation = (progress) => {
-        if (isScrapingCancelled()) {
-          progress.cancelled = true;
-          progress.status = 'Stopping...';
-        }
-        if (scraperWindow) {
-          scraperWindow.webContents.send('scrape-progress', progress);
-        }
-      };
-      
-      results = await runGoogleMapsScraper(
-        config.searchQuery,
-        config.maxResults,
-        config.industry || null,
-        config.keywords || null,
-        progressWithCancellation,
-        options
-      );
-      
-      console.log(`Google Maps scraper returned ${results ? results.length : 0} results`);
-} else if (config.type === 'website') {
-      const { runWebsiteScraper, runBulkWebsiteScraper } = require('./src/website-scraper');
-      
-      // Wrap progress callback to include cancellation check
-      const progressWithCancellation = (progress) => {
-        if (isScrapingCancelled()) {
-          progress.cancelled = true;
-          progress.status = 'Stopping...';
-        }
-        progressCallback(progress);
-      };
-      
-      // Check if bulk or single website scrape
-      if (config.isBulk || (typeof config.websiteUrl === 'string' && 
-          (config.websiteUrl.includes(',') || config.websiteUrl.includes('\n')))) {
-        // Use bulk scraper for multiple URLs
-        results = await runBulkWebsiteScraper(
-          config.websiteUrl,
-          config.industry || null,
-          config.keywords || null,
-          progressWithCancellation,
-          { checkCancellation: isScrapingCancelled } // Pass cancellation check
-        );
-      } else {
-        // Use single website scraper
-        results = await runWebsiteScraper(
-          config.websiteUrl,
-          config.industry || null,
-          config.keywords || null,
-          progressWithCancellation,
-          { checkCancellation: isScrapingCancelled } // Pass cancellation check
-        );
-      }
-    }
-    
-    // Check for cancellation
-    if (isScrapingCancelled()) {
-      if (mainWindow) {
-        mainWindow.webContents.send('refresh-data');
-      }
-      return {
-        success: false,
-        error: 'Scraping was cancelled by user',
-        cancelled: true,
-        stats: stats,
-        failedUrls: failedUrls,
-        results: results || []
-      };
-    }
-    
-    if (mainWindow) {
-      mainWindow.webContents.send('refresh-data');
-    }
-    
-    // Calculate stats if not provided by scraper
-    if (!stats && results) {
-      stats = {
-        total: results.length,
-        withEmail: results.filter(r => r.email).length,
-        withPhone: results.filter(r => r.phone_number || r.mobile_number || r.whatsapp_number).length
-      };
-    }
-    
-    // Ensure results is an array
-    const finalResults = Array.isArray(results) ? results : (results ? [results] : []);
-    
-    console.log(`Returning ${finalResults.length} results to frontend (stats: ${stats ? stats.total : 'N/A'})`);
-    
-    return { 
-      success: true, 
-      results: finalResults,
-      stats,
-      failedUrls
-    };
+    const { results, stats, failedUrls, cancelled } = await runLoop(queue, configSummary, false);
+    console.log('[start-scrape] runLoop returned:', { resultsCount: results ? results.length : 0, stats, cancelled });
+    if (mainWindow) mainWindow.webContents.send('refresh-data');
+    if (cancelled) return { success: false, error: 'Scraping was cancelled by user', cancelled: true, results: results || [], stats, failedUrls };
+    const returnValue = { success: true, results: results || [], stats, failedUrls };
+    console.log('[start-scrape] Returning to renderer:', { success: returnValue.success, resultsCount: returnValue.results.length, stats: returnValue.stats });
+    return returnValue;
   } catch (error) {
     return { success: false, error: error.message };
   }
 });
 
-// ============================================
-// UNIFIED EMAIL SCRAPER
-// ============================================
-
 ipcMain.handle('start-email-scrape', async (event, config) => {
-  // IMPORTANT: ensure a previous "stop" doesn't auto-cancel new runs
   resetCancellationFlag();
+  const queue = buildQueue({ ...config, type: 'emailscraper' });
+  if (queue.length === 0) return { success: false, error: 'No sources selected or no jobs to run' };
+  const configSummary = { type: 'emailscraper', query: config.query, sources: config.sources };
   try {
-    const { runUnifiedEmailScraper } = require('./src/email-scraper-service');
-    
-    let stats = null;
-    let errors = null;
-    let results = null;
-    
-    // Progress callback helper
-    const progressCallback = (progress) => {
-      // Check if cancellation was requested
-      if (isScrapingCancelled()) {
-        progress.status = 'Stopping...';
-        progress.cancelled = true;
-      }
-      
-      if (scraperWindow) {
-        scraperWindow.webContents.send('scrape-progress', progress);
-      }
-      if (progress.stats) {
-        stats = progress.stats;
-      }
-      if (progress.errors) {
-        errors = progress.errors;
-      }
-      // Capture results from progress if available
-      if (progress.results) {
-        results = progress.results;
-      }
-    };
-    
-    const result = await runUnifiedEmailScraper(
-      {
-        query: config.query,
-        sources: {
-          linkedin: config.sources?.linkedin || false,
-          googleSearch: config.sources?.googleSearch || false,
-          googleMaps: config.sources?.googleMaps || false,
-          websites: config.sources?.websites || false
-        },
-        maxResultsPerSource: config.maxResultsPerSource || 20,
-        industry: config.industry || null,
-        keywords: config.keywords || null
-      },
-      progressCallback,
-      isScrapingCancelled // Pass cancellation check function
-    );
-    
-    // Check for cancellation
-    if (isScrapingCancelled()) {
-      if (mainWindow) {
-        mainWindow.webContents.send('refresh-data');
-      }
-      const finalResults = result?.results || results || [];
-      const finalStats = result?.stats || stats || { total: 0, withEmail: 0, withPhone: 0 };
-      return {
-        success: false,
-        error: 'Scraping was cancelled by user',
-        cancelled: true,
-        results: finalResults,
-        stats: finalStats,
-        errors: result?.errors || errors
-      };
-    }
-    
-    if (mainWindow) {
-      mainWindow.webContents.send('refresh-data');
-    }
-    
-    // Ensure we return results even if empty array
-    const finalResults = result.results || results || [];
-    const finalStats = result.stats || stats || { total: 0, withEmail: 0, withPhone: 0 };
-    
-    console.log('Email scraper completed:', {
-      success: result.success,
-      resultsCount: finalResults.length,
-      stats: finalStats
-    });
-    
-    return {
-      success: result.success !== false,
-      results: finalResults,
-      stats: finalStats,
-      errors: result.errors || errors
-    };
+    const { results, stats, failedUrls, cancelled } = await runLoop(queue, configSummary, true);
+    if (mainWindow) mainWindow.webContents.send('refresh-data');
+    if (cancelled) return { success: false, error: 'Scraping was cancelled by user', cancelled: true, results: results || [], stats: stats || { total: 0, withEmail: 0, withPhone: 0 }, errors: null };
+    return { success: true, results: results || [], stats: stats || { total: 0, withEmail: 0, withPhone: 0 }, errors: null };
   } catch (error) {
     console.error('Email scraper error:', error);
     return { success: false, error: error.message };
   }
+});
+
+ipcMain.handle('get-run-status', async () => {
+  const saved = progressStore.load();
+  if (!saved || !saved.queue || saved.queue.length === 0) return { hasSavedRun: false };
+  return { hasSavedRun: true, jobsRemaining: saved.queue.length, counts: saved.counts || { contactsCollected: 0 }, configSummary: saved.configSummary || null };
+});
+
+ipcMain.handle('resume-run', async () => {
+  const saved = progressStore.load();
+  if (!saved || !saved.queue || saved.queue.length === 0) return { success: false, error: 'No saved run to resume' };
+  resetCancellationFlag();
+  try {
+    const { results, stats, failedUrls, cancelled } = await runLoop(saved.queue, saved.configSummary || {}, saved.configSummary?.type === 'emailscraper');
+    if (mainWindow) mainWindow.webContents.send('refresh-data');
+    if (cancelled) return { success: false, cancelled: true, results: results || [], stats, failedUrls };
+    return { success: true, results: results || [], stats, failedUrls };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('discard-saved-run', async () => {
+  progressStore.clear();
+  return { success: true };
 });
 
 // Check and create search_query column if needed
@@ -402,24 +522,89 @@ ALTER TABLE contacts ADD COLUMN IF NOT EXISTS search_query VARCHAR(200);
   }
 }
 
-// Load contacts
+// Check if search_run_id column exists (for Search History)
+async function ensureSearchRunIdColumn() {
+  try {
+    const supabase = getSupabase();
+    const { error } = await supabase.from('contacts').select('search_run_id').limit(1);
+    if (error && error.code === '42703') {
+      console.log('search_run_id column does not exist. To enable Search History view by run, run this SQL in Supabase:');
+      console.log('ALTER TABLE contacts ADD COLUMN IF NOT EXISTS search_run_id VARCHAR(100);');
+      return { columnExists: false, needsMigration: true };
+    }
+    return { columnExists: true };
+  } catch (e) {
+    return { columnExists: false };
+  }
+}
+
+// Load contacts (paginate to get all rows; Supabase default limit is 1000)
 ipcMain.handle('load-contacts', async () => {
   try {
-    // Check for search_query column on first load
     await ensureSearchQueryColumn();
-    
     const supabase = getSupabase();
-    
-    const { data, error } = await supabase
-      .from('contacts')
-      .select('*')
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
-
-    return { success: true, contacts: data || [] };
+    const pageSize = 1000;
+    let all = [];
+    let from = 0;
+    let hasMore = true;
+    while (hasMore) {
+      const { data, error } = await supabase
+        .from('contacts')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .range(from, from + pageSize - 1);
+      if (error) throw error;
+      const chunk = data || [];
+      all = all.concat(chunk);
+      hasMore = chunk.length === pageSize;
+      from += pageSize;
+    }
+    return { success: true, contacts: all };
   } catch (error) {
     return { success: false, error: error.message };
+  }
+});
+
+// Search History: list of runs (keyword, lead count, runId)
+ipcMain.handle('get-search-history', async () => {
+  try {
+    const data = searchHistoryStore.load();
+    return { success: true, runs: data.runs || [] };
+  } catch (e) {
+    return { success: false, runs: [], error: e.message };
+  }
+});
+
+// Load contacts for a specific search run (for Search History "View")
+ipcMain.handle('load-contacts-by-run-id', async (event, runId) => {
+  if (!runId) return { success: false, contacts: [], error: 'runId required' };
+  try {
+    const supabase = getSupabase();
+    const pageSize = 1000;
+    let all = [];
+    let from = 0;
+    let hasMore = true;
+    while (hasMore) {
+      const { data, error } = await supabase
+        .from('contacts')
+        .select('*')
+        .eq('search_run_id', runId)
+        .order('created_at', { ascending: false })
+        .range(from, from + pageSize - 1);
+      if (error) {
+        if (error.code === '42703') {
+          return { success: false, contacts: [], needsMigration: true };
+        }
+        throw error;
+      }
+      const chunk = data || [];
+      all = all.concat(chunk);
+      hasMore = chunk.length === pageSize;
+      from += pageSize;
+    }
+    return { success: true, contacts: all };
+  } catch (e) {
+    return { success: false, contacts: [], error: e.message };
   }
 });
 
@@ -436,6 +621,32 @@ ipcMain.handle('delete-contacts', async (event, ids) => {
     if (error) throw error;
 
     return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Clear all contacts (reset database to empty — all nav counts go to 0)
+ipcMain.handle('clear-all-contacts', async () => {
+  try {
+    const supabase = getSupabase();
+    const pageSize = 500;
+    let deleted = 0;
+    let hasMore = true;
+    while (hasMore) {
+      const { data: rows, error: selectErr } = await supabase
+        .from('contacts')
+        .select('id')
+        .limit(pageSize);
+      if (selectErr) throw selectErr;
+      if (!rows || rows.length === 0) break;
+      const ids = rows.map(r => r.id);
+      const { error: deleteErr } = await supabase.from('contacts').delete().in('id', ids);
+      if (deleteErr) throw deleteErr;
+      deleted += ids.length;
+      hasMore = rows.length === pageSize;
+    }
+    return { success: true, deleted };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -730,6 +941,173 @@ ipcMain.handle('verify-emails', async (event, emailData, apiKey) => {
   }
 });
 
+// Bulk verify emails via real-time SMTP (no API key; may not work if port 25 is blocked)
+ipcMain.handle('verify-emails-smtp', async (event, emailData) => {
+  try {
+    const supabase = getSupabase();
+    const results = [];
+    const DELAY_MS = 400;
+
+    console.log(`Starting SMTP verification of ${emailData.length} emails`);
+
+    for (let i = 0; i < emailData.length; i++) {
+      const item = emailData[i];
+
+      if (mainWindow) {
+        mainWindow.webContents.send('verification-progress', {
+          current: i + 1,
+          total: emailData.length,
+          email: item.email,
+          quotaReached: false
+        });
+      }
+
+      if (!item.email) {
+        results.push({ id: item.id, verified: false, status: 'no_email' });
+        continue;
+      }
+
+      try {
+        const verifyResult = await verifyEmailSmtp(item.email, { timeout: 12000 });
+
+        const { error } = await supabase
+          .from('contacts')
+          .update({
+            email_verified: verifyResult.isValid === true,
+            verification_status: verifyResult.status,
+            verification_details: verifyResult.details
+          })
+          .eq('id', item.id);
+
+        if (error) console.error('Supabase update error:', error);
+
+        results.push({
+          id: item.id,
+          verified: verifyResult.isValid === true,
+          status: verifyResult.status,
+          details: verifyResult.details
+        });
+
+        if (i < emailData.length - 1) await new Promise((r) => setTimeout(r, DELAY_MS));
+      } catch (err) {
+        console.error('SMTP verification error for', item.email, err);
+        results.push({ id: item.id, verified: false, status: 'error', details: { error: err.message } });
+      }
+    }
+
+    const verifiedCount = results.filter((r) => r.verified).length;
+    const invalidCount = results.filter((r) => r.status === 'invalid').length;
+    console.log(`SMTP verification complete: ${verifiedCount} verified, ${invalidCount} invalid`);
+
+    return { success: true, results, quotaExceeded: false, quotaExceededCount: 0 };
+  } catch (error) {
+    console.error('Bulk SMTP verification error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Bulk verify emails via MX + syntax only (no RCPT TO, not blocked by anti-verification)
+ipcMain.handle('verify-emails-mx', async (event, emailData) => {
+  try {
+    const supabase = getSupabase();
+    const results = [];
+    const progressTarget = event.sender;
+
+    console.log(`Starting MX+syntax verification of ${emailData.length} emails`);
+
+    for (let i = 0; i < emailData.length; i++) {
+      const item = emailData[i];
+
+      if (progressTarget && !progressTarget.isDestroyed()) {
+        progressTarget.send('verification-progress', {
+          current: i + 1,
+          total: emailData.length,
+          email: item.email,
+          quotaReached: false
+        });
+      }
+
+      if (!item.email) {
+        results.push({ id: item.id, verified: false, status: 'no_email' });
+        continue;
+      }
+
+      const verifyResult = await verifyEmailMxSyntax(item.email);
+
+      const { error } = await supabase
+        .from('contacts')
+        .update({
+          email_verified: verifyResult.isValid === true,
+          verification_status: verifyResult.status,
+          verification_details: verifyResult.details
+        })
+        .eq('id', item.id);
+
+      if (error) console.error('Supabase update error:', error);
+
+      results.push({
+        id: item.id,
+        verified: verifyResult.isValid === true,
+        status: verifyResult.status,
+        details: verifyResult.details
+      });
+    }
+
+    const verifiedCount = results.filter((r) => r.verified).length;
+    console.log(`MX+syntax verification complete: ${verifiedCount} verified`);
+    return { success: true, results, quotaExceeded: false, quotaExceededCount: 0 };
+  } catch (error) {
+    console.error('MX verification error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Verify emails for scraper results (look up contact ids by email, then run MX + syntax verification)
+ipcMain.handle('verify-scraper-results', async (event, contacts) => {
+  if (!contacts || !Array.isArray(contacts)) return { success: false, error: 'No contacts provided' };
+  const emails = [...new Set(contacts.map(c => c && c.email).filter(Boolean))];
+  if (emails.length === 0) return { success: true, results: [] };
+  try {
+    const supabase = getSupabase();
+    const { data: rows, error: fetchError } = await supabase.from('contacts').select('id, email').in('email', emails);
+    if (fetchError) {
+      console.error('Fetch contacts for verify:', fetchError);
+      return { success: false, error: fetchError.message };
+    }
+    const emailData = (rows || []).map(r => ({ id: r.id, email: r.email }));
+    if (emailData.length === 0) return { success: true, results: emails.map(e => ({ email: e, verified: false, status: 'not_found' })) };
+    const results = [];
+    const progressTarget = event.sender;
+    for (let i = 0; i < emailData.length; i++) {
+      const item = emailData[i];
+      if (progressTarget && !progressTarget.isDestroyed()) {
+        progressTarget.send('verification-progress', { current: i + 1, total: emailData.length, email: item.email, quotaReached: false });
+      }
+      if (!item.email) {
+        results.push({ email: item.email, verified: false, status: 'no_email' });
+        continue;
+      }
+      try {
+        const verifyResult = await verifyEmailMxSyntax(item.email);
+        const { error } = await supabase.from('contacts').update({
+          email_verified: verifyResult.isValid === true,
+          verification_status: verifyResult.status,
+          verification_details: verifyResult.details
+        }).eq('id', item.id);
+        if (error) console.error('Supabase update error:', error);
+        results.push({ email: item.email, verified: verifyResult.isValid === true, status: verifyResult.status });
+      } catch (err) {
+        console.error('MX verification error for', item.email, err);
+        results.push({ email: item.email, verified: false, status: 'error' });
+      }
+    }
+    return { success: true, results };
+  } catch (error) {
+    console.error('verify-scraper-results error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
 // Update single contact verification status
 ipcMain.handle('update-contact-verification', async (event, contactId, isVerified, status) => {
   try {
@@ -797,8 +1175,16 @@ ipcMain.handle('import-contacts', async (event, contacts) => {
     }
 
     // Separate contacts with and without email
-    const withEmail = contacts.filter(c => c.email);
+    let withEmail = contacts.filter(c => c.email);
     const withoutEmail = contacts.filter(c => !c.email);
+
+    // Deduplicate by email so ON CONFLICT DO UPDATE doesn't touch the same row twice
+    const byEmail = new Map();
+    for (const c of withEmail) {
+      const key = (c.email || '').trim().toLowerCase();
+      if (key) byEmail.set(key, c);
+    }
+    withEmail = Array.from(byEmail.values());
 
     let imported = 0;
 
@@ -930,10 +1316,11 @@ function replaceTemplateVariables(template, contact) {
   
   let result = template;
   
-  // Standard variables
+  // Standard variables (Mailgun/Mailchimp-style: Name, Surname, Company, etc.)
   const variables = {
     '{{first_name}}': contact.first_name || '',
     '{{last_name}}': contact.last_name || '',
+    '{{surname}}': contact.last_name || '', // alias
     '{{full_name}}': [contact.first_name, contact.last_name].filter(Boolean).join(' ') || '',
     '{{email}}': contact.email || '',
     '{{company}}': contact.company || '',

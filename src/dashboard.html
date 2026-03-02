@@ -13,7 +13,7 @@
         <div class="quota-banner-icon">⚠️</div>
         <div class="quota-banner-text">
           <strong>API Quota Exceeded</strong>
-          <span id="quotaBannerMessage">The Abstract Email Reputation API quota has been exhausted. Upgrade your plan or use a different API key to continue verification.</span>
+          <span id="quotaBannerMessage">The Abstract API quota for bounce-checking has been exhausted. Upgrade your plan or use a different API key to continue.</span>
         </div>
         <button id="dismissQuotaBanner" class="quota-banner-dismiss">×</button>
       </div>
@@ -105,6 +105,18 @@
           </div>
 
           <div class="stat-card">
+            <div class="stat-icon" style="background: #e3f2fd">
+              <svg viewBox="0 0 24 24" fill="none" stroke="#1a73e8" stroke-width="2">
+                <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+              </svg>
+            </div>
+            <div class="stat-content">
+              <div class="stat-label">Google Search</div>
+              <div class="stat-value" id="googleSearchCount">0</div>
+            </div>
+          </div>
+
+          <div class="stat-card">
             <div class="stat-icon" style="background: #e8f5e9">
               <svg viewBox="0 0 24 24" fill="none" stroke="#4caf50" stroke-width="2">
                 <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
@@ -112,7 +124,7 @@
               </svg>
             </div>
             <div class="stat-content">
-              <div class="stat-label">Verified</div>
+              <div class="stat-label">Bounce-checked</div>
               <div class="stat-value" id="verifiedCount">0</div>
             </div>
           </div>
@@ -174,6 +186,14 @@
               <span class="nav-count" id="navMapsCount">0</span>
             </button>
 
+            <button class="nav-btn" data-view="googlesearch">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+              </svg>
+              Google Search
+              <span class="nav-count" id="navGoogleSearchCount">0</span>
+            </button>
+
             <button class="nav-btn" data-view="websites">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <circle cx="12" cy="12" r="10" />
@@ -182,6 +202,13 @@
               </svg>
               Websites
               <span class="nav-count" id="navWebsitesCount">0</span>
+            </button>
+
+            <button class="nav-btn" data-view="search-history">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+              </svg>
+              Search History
             </button>
           </div>
 
@@ -193,6 +220,14 @@
                 <path d="M12 5v14M5 12h14" />
               </svg>
               New Scrape
+            </button>
+
+            <button class="nav-btn" id="clearAllDataBtn" title="Remove all contacts so the app starts with 0 everywhere">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                <line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>
+              </svg>
+              Clear all data
             </button>
 
             <button class="nav-btn" id="importContactsBtn">
@@ -212,6 +247,13 @@
               SMTP Settings
               <span class="smtp-status-dot" id="smtpStatusDot"></span>
             </button>
+            <button class="nav-btn" id="openEmailGeneratorNavBtn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+                <polyline points="22,6 12,13 2,6"/>
+              </svg>
+              Generate Random Emails
+            </button>
           </div>
         </nav>
       </aside>
@@ -225,12 +267,13 @@
             <p class="subtitle" id="contactCount">Loading...</p>
           </div>
           <div class="header-right">
+            <span id="verificationProgress" class="verification-progress" style="display: none;" title="Current email being checked"></span>
             <button class="btn-verify" id="verifySelectedBtn" style="display: none;">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
                 <polyline points="22 4 12 14.01 9 11.01"/>
               </svg>
-              Verify Emails
+              <span class="verify-btn-progress">Check for bounces</span>
             </button>
             <button class="btn-email-selected" id="emailSelectedBtn" style="display: none;">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -256,12 +299,18 @@
               </svg>
               Refresh
             </button>
-            <button class="btn-primary" id="exportBtn">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
-              </svg>
-              Export CSV
-            </button>
+            <div class="export-dropdown">
+              <button class="btn-primary" id="exportBtn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+                </svg>
+                Export CSV
+              </button>
+              <div class="export-menu" id="exportMenu" style="display: none;">
+                <button type="button" id="exportAllBtn">Export All</button>
+                <button type="button" id="exportVerifiedOnlyBtn">Export Verified Only</button>
+              </div>
+            </div>
           </div>
         </header>
 
@@ -278,15 +327,17 @@
           <select id="sourceFilter" class="filter-select">
             <option value="">All Sources</option>
             <option value="linkedin">LinkedIn</option>
+            <option value="linkedin_sales_navigator">Sales Nav</option>
             <option value="google_maps">Google Maps</option>
+            <option value="google_search">Google Search</option>
             <option value="website">Website</option>
             <option value="manual">Manual Import</option>
           </select>
 
-          <select id="verificationFilter" class="filter-select">
+          <select id="verificationFilter" class="filter-select" title="Bounce-checked = passed (no MX / 5xx); Not checked = not yet run">
             <option value="">All Status</option>
-            <option value="verified">Verified</option>
-            <option value="unverified">Unverified</option>
+            <option value="verified">Bounce-checked</option>
+            <option value="unverified">Not checked</option>
           </select>
 
           <select id="industryFilter" class="filter-select">
@@ -344,8 +395,9 @@
                   </svg>
                 </th>
                 <th>Source</th>
-                <th class="sortable" data-sort="email_verified">
-                  Email Status
+                <th>LinkedIn</th>
+                <th class="sortable" data-sort="email_verified" title="Bounce check: no MX / 5xx">
+                  Bounce check
                   <svg class="sort-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M12 5v14M19 12l-7 7-7-7" />
                   </svg>
@@ -361,13 +413,33 @@
             </thead>
             <tbody id="tableBody">
               <tr>
-                <td colspan="11" class="loading-cell">
+                <td colspan="12" class="loading-cell">
                   <div class="spinner"></div>
                   <p>Loading contacts...</p>
                 </td>
               </tr>
             </tbody>
           </table>
+        </div>
+
+        <!-- Search History View -->
+        <div id="searchHistoryView" class="search-history-view" style="display: none;">
+          <div class="search-history-header">
+            <h3>Past searches</h3>
+            <p class="search-history-subtitle">Click a search to view and export the leads from that run.</p>
+          </div>
+          <div id="searchHistoryList" class="search-history-list">
+            <!-- Runs loaded here -->
+          </div>
+          <div id="searchHistoryEmpty" class="search-history-empty" style="display: none;">
+            <p>No search history yet. Run a LinkedIn (or other) search from the scraper to see it here.</p>
+          </div>
+        </div>
+
+        <!-- Shown above table when viewing a search run's leads -->
+        <div id="searchHistoryBackBar" style="display: none; margin-bottom: 12px;">
+          <button type="button" class="btn-secondary" id="backToSearchHistoryBtn">← Back to Search History</button>
+          <span id="searchHistoryRunCaption" class="search-history-caption" style="margin-left: 12px;"></span>
         </div>
 
         <!-- Email Campaigns View -->
@@ -411,12 +483,18 @@
             </svg>
             Email Selected
           </button>
+          <select id="verifyMethod" class="verify-method-select" title="API = Abstract key. SMTP = RCPT TO (can be blocked). MX = syntax + MX only (not blocked).">
+            <option value="api">Bounce check: API (Abstract)</option>
+            <option value="smtp">Bounce check: SMTP (RCPT TO)</option>
+            <option value="mx">Bounce check: MX + syntax only</option>
+          </select>
+          <span id="verificationProgress2" class="verification-progress" style="display: none;" title="Current email being checked"></span>
           <button class="btn-verify" id="verifySelectedBtn2">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
               <polyline points="22 4 12 14.01 9 11.01"/>
             </svg>
-            Verify Selected
+            <span class="verify-btn-progress">Check for bounces</span>
           </button>
           <button class="btn-danger" id="deleteSelectedBtn">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -517,7 +595,7 @@
             <div class="preview-table-wrapper">
               <table class="preview-table">
                 <thead id="previewHead"></thead>
-                <tbody id="previewBody"></tbody>
+                <tbody id="csvPreviewBody"></tbody>
               </table>
             </div>
           </div>
@@ -596,8 +674,8 @@
     <!-- API Key Modal -->
     <div id="apiKeyModal" class="modal" style="display: none;">
       <div class="modal-content">
-        <h3>Email Verification API Key</h3>
-        <p>Enter your Abstract API key for email verification.</p>
+        <h3>Bounce-check API Key (Abstract)</h3>
+        <p>Used to reduce bounces by catching no MX, dead mailboxes, and clear 5xx "user unknown".</p>
         <p style="font-size: 12px; color: #666;">Get a free key at: <a href="https://www.abstractapi.com/api/email-verification-validation-api" target="_blank">abstractapi.com</a></p>
         <input type="text" id="apiKeyInput" placeholder="Enter API key...">
         <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px;">
@@ -680,6 +758,9 @@
             <button type="button" class="btn-secondary" id="testSmtpBtn">Test Connection</button>
             <button type="submit" class="btn-primary">Connect</button>
           </div>
+          <p style="margin-top: 16px; font-size: 0.9rem; color: #666;">
+            <button type="button" class="btn-clear" id="openEmailGeneratorBtn">Generate Random Emails</button> — for testing / survivability (e.g. xhsuemcj27ch@yourdomain.com)
+          </p>
         </form>
       </div>
     </div>
@@ -702,7 +783,7 @@
             <div class="form-group">
               <label for="emailSubject">Subject Line *</label>
               <input type="text" id="emailSubject" placeholder="Hello {{first_name}}, we have an offer for you!">
-              <small>Use variables: {{first_name}}, {{last_name}}, {{company}}, {{job_title}}</small>
+              <small>Variables: {{first_name}}, {{last_name}}, {{surname}}, {{company}}, {{job_title}}, {{location}}, {{industry}}, {{email}}</small>
             </div>
 
             <div class="form-group">
@@ -719,6 +800,7 @@
                   <option value="">Insert Variable...</option>
                   <option value="{{first_name}}">First Name</option>
                   <option value="{{last_name}}">Last Name</option>
+                  <option value="{{surname}}">Surname</option>
                   <option value="{{full_name}}">Full Name</option>
                   <option value="{{email}}">Email</option>
                   <option value="{{company}}">Company</option>
@@ -737,13 +819,18 @@
 
             <div class="form-row">
               <div class="form-group">
+                <label for="fromEmailOverride">From Email (optional)</label>
+                <input type="email" id="fromEmailOverride" placeholder="Leave blank to use SMTP account">
+                <small>Override for this campaign (e.g. generated alias). Uses SMTP account if empty.</small>
+              </div>
+              <div class="form-group">
                 <label for="replyToEmail">Reply-To Email</label>
                 <input type="email" id="replyToEmail" placeholder="replies@yourcompany.com">
               </div>
-              <div class="form-group">
-                <label for="campaignName">Campaign Name</label>
-                <input type="text" id="campaignName" placeholder="Q1 Outreach Campaign">
-              </div>
+            </div>
+            <div class="form-group">
+              <label for="campaignName">Campaign Name</label>
+              <input type="text" id="campaignName" placeholder="Q1 Outreach Campaign">
             </div>
           </div>
 
@@ -755,7 +842,7 @@
                 <div class="preview-header">
                   <strong>Subject:</strong> <span id="previewSubject">Hello there, we have an offer for you!</span>
                 </div>
-                <div class="preview-body" id="previewBody">
+                <div class="preview-body" id="emailPreviewBody">
                   <p>Hi there,</p>
                   <p>I hope this email finds you well.</p>
                   <p></p>
@@ -772,6 +859,11 @@
 
             <div class="recipients-section">
               <h4>Recipients (<span id="recipientCount">0</span>)</h4>
+              <div class="recipients-import">
+                <button type="button" class="btn-secondary btn-sm" id="importCsvRecipientsBtn">Import CSV</button>
+                <input type="file" id="importCsvRecipientsFile" accept=".csv,.txt" style="display: none;">
+                <button type="button" class="btn-secondary btn-sm" id="pasteRecipientsBtn">Paste list</button>
+              </div>
               <div class="recipients-list" id="recipientsList">
                 <p class="no-recipients">No recipients selected</p>
               </div>
@@ -865,7 +957,10 @@
         <div class="generated-emails" id="generatedEmails" style="display: none;">
           <label>Generated Emails:</label>
           <textarea id="generatedEmailsList" rows="6" readonly></textarea>
-          <button class="btn-secondary" id="copyGeneratedBtn">Copy to Clipboard</button>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px;">
+            <button class="btn-secondary" id="copyGeneratedBtn">Copy to Clipboard</button>
+            <button class="btn-secondary" id="useFirstAsFromBtn">Use first as From (composer)</button>
+          </div>
         </div>
         <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px;">
           <button id="closeGeneratorBtn" class="btn-secondary">Close</button>

@@ -1,10 +1,17 @@
 // Import email extractor for name extraction (with fallback)
 let extractNameFromEmail;
+let isLikelyNotNameOrCompany;
+let extractCompanyFromDomain;
 try {
   const emailExtractor = require('./email-extractor');
   extractNameFromEmail = emailExtractor.extractNameFromEmail;
+  isLikelyNotNameOrCompany = emailExtractor.isLikelyNotNameOrCompany || (() => false);
+  extractCompanyFromDomain = emailExtractor.extractCompanyFromDomain || (() => null);
 } catch (e) {
-  // Fallback function if require fails
+  isLikelyNotNameOrCompany = () => false;
+  extractCompanyFromDomain = () => null;
+}
+if (typeof extractNameFromEmail !== 'function') {
   extractNameFromEmail = function(email) {
     if (!email || typeof email !== 'string') return null;
     const localPart = email.split('@')[0].toLowerCase();
@@ -44,6 +51,11 @@ try {
   };
 }
 
+// Sources that scrape websites for business/contact info: use page/business name or company, never email-derived person name
+function isWebsiteLikeSource(source) {
+  return source === 'website' || source === 'google_maps' || source === 'google_search';
+}
+
 // DOM elements
 const tableBody = document.getElementById("tableBody");
 const emptyState = document.getElementById("emptyState");
@@ -72,6 +84,7 @@ const totalCompanies = document.getElementById("totalCompanies");
 const linkedinCount = document.getElementById("linkedinCount");
 const mapsCount = document.getElementById("mapsCount");
 const websiteCount = document.getElementById("websiteCount");
+const googleSearchCount = document.getElementById("googleSearchCount");
 const verifiedCountEl = document.getElementById("verifiedCount");
 
 // Nav counts
@@ -79,6 +92,7 @@ const navPeopleCount = document.getElementById("navPeopleCount");
 const navCompaniesCount = document.getElementById("navCompaniesCount");
 const navLinkedInCount = document.getElementById("navLinkedInCount");
 const navMapsCount = document.getElementById("navMapsCount");
+const navGoogleSearchCount = document.getElementById("navGoogleSearchCount");
 const navWebsitesCount = document.getElementById("navWebsitesCount");
 const navCampaignsCount = document.getElementById("navCampaignsCount");
 
@@ -98,6 +112,10 @@ let campaigns = [];
 let currentCampaignRecipients = [];
 let isSendingEmails = false;
 let smtpConnected = false;
+
+// Search History: when viewing a run's leads
+let selectedSearchRunId = null;
+let selectedSearchRunKeyword = null;
 
 // Advanced Filters
 const MANAGEMENT_LEVELS = {
@@ -135,8 +153,20 @@ const INDUSTRIES = [
 let activeManagementFilters = new Set();
 let activeIndustryFilters = new Set();
 
+// Initialize: show 0 everywhere until data loads (keeps nav clean on first paint and on error)
+function ensureZeroState() {
+  allContacts = [];
+  campaigns = [];
+  selectedContacts.clear();
+  applyViewFilter();
+  updateStats();
+  populateFilters();
+  renderTable();
+}
+
 // Initialize
 async function init() {
+  ensureZeroState();
   await loadContacts();
   await checkSmtpStatus();
   setupEventListeners();
@@ -145,9 +175,26 @@ async function init() {
   setupSmtpSettings();
   setupEmailGenerator();
   
-  // Listen for refresh from main process
+  // Listen for refresh from main process (e.g. after a scrape completes)
   if (window.electronAPI.onRefreshData) {
     window.electronAPI.onRefreshData(() => loadContacts());
+  }
+  // Show message if saving contacts to DB failed
+  if (window.electronAPI.onContactsSaveError) {
+    window.electronAPI.onContactsSaveError((data) => {
+      showError('Contacts could not be saved: ' + (data?.message || 'Unknown error'));
+    });
+  }
+  // Reload contacts when dashboard window gains focus (backup if refresh-data was missed)
+  if (typeof window !== 'undefined') {
+    let lastFocusLoad = 0;
+    window.addEventListener('focus', () => {
+      const now = Date.now();
+      if (now - lastFocusLoad > 2000) {
+        lastFocusLoad = now;
+        loadContacts();
+      }
+    });
   }
   
   // Listen for verification progress
@@ -204,12 +251,25 @@ function updateSmtpStatusUI() {
   }
 }
 
-// Update verification progress UI
+// Update verification progress UI (show how many checked during verification)
 function updateVerificationProgress(data) {
-  const progressEl = document.getElementById('verificationProgress');
-  if (progressEl) {
-    progressEl.innerHTML = `Verifying ${data.current}/${data.total}: ${data.email}`;
-  }
+  const current = data.current ?? 0;
+  const total = data.total ?? 0;
+  const email = data.email ? String(data.email) : '';
+  const progressText = total > 0 ? `Checking ${current} / ${total}` : 'Checking...';
+  const detailText = email ? ` — ${email}` : '';
+
+  [document.getElementById('verificationProgress'), document.getElementById('verificationProgress2')].forEach((el) => {
+    if (el) {
+      el.style.display = 'inline-flex';
+      el.textContent = progressText + detailText;
+      el.title = email || progressText;
+    }
+  });
+
+  document.querySelectorAll('.verify-btn-progress').forEach((el) => {
+    el.textContent = progressText;
+  });
 }
 
 // Update email send progress UI
@@ -237,16 +297,18 @@ async function loadContacts() {
     const result = await window.electronAPI.loadContacts();
 
     if (result.success) {
-      allContacts = result.contacts;
+      allContacts = result.contacts || [];
       applyViewFilter();
       updateStats();
       populateFilters();
       renderTable();
     } else {
+      ensureZeroState();
       showError(result.error || "Failed to load contacts");
     }
   } catch (error) {
     console.error("Error loading contacts:", error);
+    ensureZeroState();
     showError("Failed to load contacts");
   }
 }
@@ -267,10 +329,13 @@ function applyViewFilter() {
       filteredContacts = Array.from(companiesMap.values());
       break;
     case "linkedin":
-      filteredContacts = allContacts.filter((c) => c.source === "linkedin");
+      filteredContacts = allContacts.filter((c) => c.source === "linkedin" || c.source === "linkedin_sales_navigator");
       break;
     case "googlemaps":
       filteredContacts = allContacts.filter((c) => c.source === "google_maps");
+      break;
+    case "googlesearch":
+      filteredContacts = allContacts.filter((c) => c.source === "google_search");
       break;
     case "websites":
       filteredContacts = allContacts.filter((c) => c.source === "website");
@@ -278,6 +343,10 @@ function applyViewFilter() {
     case "campaigns":
       // Campaigns view doesn't filter contacts
       filteredContacts = [];
+      break;
+    case "search-history":
+      // If viewing a specific run's leads, filteredContacts already set; else show list only
+      if (!selectedSearchRunId) filteredContacts = [];
       break;
     default:
       filteredContacts = [...allContacts];
@@ -288,8 +357,9 @@ function applyViewFilter() {
 function updateStats() {
   const total = allContacts.length;
   const companies = new Set(allContacts.map((c) => c.company).filter(Boolean)).size;
-  const linkedin = allContacts.filter((c) => c.source === "linkedin").length;
+  const linkedin = allContacts.filter((c) => c.source === "linkedin" || c.source === "linkedin_sales_navigator").length;
   const maps = allContacts.filter((c) => c.source === "google_maps").length;
+  const googleSearch = allContacts.filter((c) => c.source === "google_search").length;
   const website = allContacts.filter((c) => c.source === "website").length;
   const verified = allContacts.filter((c) => c.email_verified === true).length;
 
@@ -297,6 +367,7 @@ function updateStats() {
   if (totalCompanies) totalCompanies.textContent = companies;
   if (linkedinCount) linkedinCount.textContent = linkedin;
   if (mapsCount) mapsCount.textContent = maps;
+  if (googleSearchCount) googleSearchCount.textContent = googleSearch;
   if (websiteCount) websiteCount.textContent = website;
   if (verifiedCountEl) verifiedCountEl.textContent = verified;
 
@@ -304,6 +375,7 @@ function updateStats() {
   if (navCompaniesCount) navCompaniesCount.textContent = companies;
   if (navLinkedInCount) navLinkedInCount.textContent = linkedin;
   if (navMapsCount) navMapsCount.textContent = maps;
+  if (navGoogleSearchCount) navGoogleSearchCount.textContent = googleSearch;
   if (navWebsitesCount) navWebsitesCount.textContent = website;
   if (navCampaignsCount) navCampaignsCount.textContent = campaigns.length;
 
@@ -367,19 +439,19 @@ function populatePreviewContacts() {
   contactsWithEmail.forEach(contact => {
     const option = document.createElement('option');
     option.value = contact.id;
-    // Extract name from email if available
+    // Website / Google Maps / Google Search: no name — use company only.
     let name = "";
-    if (contact.email) {
+    if (isWebsiteLikeSource(contact.source)) {
+      name = (contact.company && !isLikelyNotNameOrCompany(contact.company)) ? contact.company : (contact.email ? extractCompanyFromDomain(contact.email) : null) || "—";
+    } else if (contact.email) {
       const emailName = extractNameFromEmail(contact.email);
       if (emailName && emailName.fullName) {
         name = emailName.fullName;
       }
     }
-    
     if (!name) {
       name = `${contact.first_name || ''} ${contact.last_name || ''}`.trim() || contact.company || 'Unknown';
     }
-    
     option.textContent = `${name} (${contact.email})`;
     previewSelect.appendChild(option);
   });
@@ -400,7 +472,7 @@ function renderTable() {
       if (tableContainer) tableContainer.style.display = "none";
       if (emptyState) emptyState.style.display = "block";
     } else {
-      tableBody.innerHTML = `<tr><td colspan="11" style="text-align: center; padding: 40px; color: #999;">No contacts match your filters</td></tr>`;
+      tableBody.innerHTML = `<tr><td colspan="12" style="text-align: center; padding: 40px; color: #999;">No contacts match your filters</td></tr>`;
     }
     return;
   }
@@ -413,35 +485,38 @@ function renderTable() {
     const row = document.createElement("tr");
     row.dataset.contactId = contact.id;
 
-    // Name display - prioritize person's name from email if available
+    // Name display: Website = page title/h1 only (first_name). Never show email-derived person name for website.
     let name = "";
-    if (contact.source === "linkedin") {
-      name = `${contact.first_name || ""} ${contact.last_name || ""}`.trim();
+    const storedName = `${contact.first_name || ""} ${contact.last_name || ""}`.trim();
+    const storedNameIsJunk = storedName && isLikelyNotNameOrCompany(storedName);
+    if (contact.source === "linkedin" || contact.source === "linkedin_sales_navigator") {
+      name = storedNameIsJunk ? "" : storedName;
+    } else if (isWebsiteLikeSource(contact.source)) {
+      // Website / Google Maps / Google Search: no name — use company column only (company or domain from email).
+      const companyVal = (contact.company && !isLikelyNotNameOrCompany(contact.company)) ? contact.company : (contact.email ? extractCompanyFromDomain(contact.email) : null);
+      name = companyVal || "—";
     } else {
-      // For non-LinkedIn sources, try to extract name from email first
       if (contact.email) {
         const emailName = extractNameFromEmail(contact.email);
         if (emailName && emailName.fullName) {
           name = emailName.fullName;
-        } else {
-          // Fall back to stored first_name/last_name if available
-          name = `${contact.first_name || ""} ${contact.last_name || ""}`.trim();
+        } else if (!storedNameIsJunk && storedName) {
+          name = storedName;
         }
       }
-      
-      // If still no name, use company or first_name
       if (!name || name === "") {
-        name = contact.company || contact.first_name || "N/A";
+        name = (contact.company && !isLikelyNotNameOrCompany(contact.company)) ? contact.company : (contact.company || "N/A");
       }
     }
 
     const email = contact.email || "-";
-    const company = contact.company || "-";
+    const companyRaw = contact.company || "";
+    const company = (companyRaw && !isLikelyNotNameOrCompany(companyRaw)) ? companyRaw : (contact.email && extractCompanyFromDomain(contact.email)) || "-";
     const industry = contact.industry || "-";
 
     // Phone/Job Title based on source
     let phoneJobTitle = "-";
-    if (contact.source === "linkedin") {
+    if (contact.source === "linkedin" || contact.source === "linkedin_sales_navigator") {
       phoneJobTitle = contact.job_title || "-";
     } else if (contact.source === "google_maps") {
       const phones = [];
@@ -465,27 +540,33 @@ function renderTable() {
       sourceBadge = '<span class="source-badge source-linkedin">LinkedIn</span>';
     } else if (contact.source === "google_maps") {
       sourceBadge = '<span class="source-badge source-maps">Google Maps</span>';
+    } else if (contact.source === "google_search") {
+      sourceBadge = '<span class="source-badge source-google-search">Google Search</span>';
     } else if (contact.source === "website") {
       sourceBadge = '<span class="source-badge source-website">Website</span>';
     } else if (contact.source === "manual") {
       sourceBadge = '<span class="source-badge source-manual">Manual</span>';
+    } else if (contact.source === "linkedin_sales_navigator") {
+      sourceBadge = '<span class="source-badge source-sales-nav">Sales Nav</span>';
+    } else if (contact.source) {
+      sourceBadge = '<span class="source-badge">' + contact.source + '</span>';
     }
 
     // Verification badge with visual indicators
     let verifiedBadge = '';
     if (contact.email_verified === true) {
       verifiedBadge = `
-        <span class="verified-badge verified" title="Email verified as deliverable">
+        <span class="verified-badge verified" title="Passed bounce check (no MX, no 5xx user unknown)">
           <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
             <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
           </svg>
-          Verified
+          Checked
         </span>`;
     } else if (contact.verification_status === 'verifying') {
-      verifiedBadge = '<span class="verified-badge verifying"><span class="spinner-small"></span>Verifying...</span>';
+      verifiedBadge = '<span class="verified-badge verifying"><span class="spinner-small"></span>Checking...</span>';
     } else if (contact.verification_status === 'risky') {
       verifiedBadge = `
-        <span class="verified-badge risky" title="Email may be risky">
+        <span class="verified-badge risky" title="May be risky (API signal)">
           <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
             <path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/>
           </svg>
@@ -493,22 +574,30 @@ function renderTable() {
         </span>`;
     } else if (contact.verification_status === 'invalid') {
       verifiedBadge = `
-        <span class="verified-badge invalid" title="Email is invalid">
+        <span class="verified-badge invalid" title="Would bounce: no MX or user unknown (5xx)">
           <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
             <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
           </svg>
-          Invalid
+          Would bounce
         </span>`;
     } else if (contact.verification_status === 'quota_exceeded') {
       verifiedBadge = `
-        <span class="verified-badge quota-exceeded" title="API quota exceeded - could not verify">
+        <span class="verified-badge quota-exceeded" title="API quota exceeded - could not bounce-check">
           <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
             <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
           </svg>
           Quota Exceeded
         </span>`;
+    } else if (contact.verification_status === 'inferred') {
+      verifiedBadge = '<span class="verified-badge inferred" title="Email inferred from company domain (e.g. first.last@company.com)">Inferred</span>';
+    } else if (contact.verification_status === 'needs_manual_review') {
+      verifiedBadge = '<span class="verified-badge needs-manual-review" title="No email or phone found – review manually">Needs Manual Review</span>';
+    } else if (contact.verification_status === 'unknown') {
+      verifiedBadge = '<span class="verified-badge unknown" title="Inconclusive: server said no but may be blocking verification (anti-abuse), or temporary">Unknown</span>';
+    } else if (contact.verification_status === 'error') {
+      verifiedBadge = '<span class="verified-badge error" title="Check failed (e.g. timeout, port 25 blocked)">Error</span>';
     } else if (contact.email && contact.email !== '-') {
-      verifiedBadge = '<span class="verified-badge unverified">Unverified</span>';
+      verifiedBadge = '<span class="verified-badge unverified" title="Not yet checked for bounces">Not checked</span>';
     } else {
       verifiedBadge = '<span class="verified-badge no-email">No Email</span>';
     }
@@ -545,6 +634,9 @@ function renderTable() {
       }
     }
 
+    const linkedinCell = contact.linkedin_url
+      ? `<a href="${contact.linkedin_url}" target="_blank" rel="noopener noreferrer" class="linkedin-link" title="Open profile">Profile</a>`
+      : "-";
     row.innerHTML = `
       <td><input type="checkbox" class="row-checkbox" data-id="${contact.id}"></td>
       <td><span class="contact-name">${name}</span></td>
@@ -554,6 +646,7 @@ function renderTable() {
       <td>${phoneJobTitle}</td>
       <td>${location}</td>
       <td>${sourceBadge}</td>
+      <td>${linkedinCell}</td>
       <td>${verifiedBadge}</td>
       <td><span class="date-added" title="${contact.created_at ? new Date(contact.created_at).toLocaleString() : ''}">${dateAdded}</span></td>
       <td>
@@ -640,16 +733,20 @@ async function deleteContacts(ids) {
   }
 }
 
-// Verify selected emails - BULK VERIFICATION
+// Verify selected emails - BULK VERIFICATION (API or SMTP)
 async function verifySelectedEmails() {
   if (isVerifying) {
     alert('Verification already in progress!');
     return;
   }
-  
-  // Use built-in API key - no prompt needed
-  if (!abstractApiKey) {
-    abstractApiKey = DEFAULT_API_KEY;
+
+  const verifyMethodEl = document.getElementById('verifyMethod');
+  const methodValue = verifyMethodEl ? verifyMethodEl.value : 'smtp';
+  const useSmtp = methodValue === 'smtp';
+  const useMx = methodValue === 'mx';
+
+  if (!useSmtp && !useMx) {
+    if (!abstractApiKey) abstractApiKey = DEFAULT_API_KEY;
   }
 
   const selectedIds = Array.from(selectedContacts);
@@ -661,18 +758,20 @@ async function verifySelectedEmails() {
   );
 
   if (contactsToVerify.length === 0) {
-    alert('No unverified contacts with emails selected!\n\nTip: Select contacts that show "Unverified" status.');
+    alert('No contacts with emails selected for bounce-check!\n\nTip: Select contacts that show "Not checked" status.');
     return;
   }
 
-  // Simple confirmation
-  if (!confirm(`Verify ${contactsToVerify.length} email(s)?\n\nThis will check if the emails are real and deliverable.`)) {
+  const methodLabel = useMx ? 'MX + syntax only' : useSmtp ? 'SMTP (RCPT TO)' : 'API (Abstract)';
+  const confirmMsg = useMx
+    ? `Check ${contactsToVerify.length} email(s) using MX + syntax only?\n\nValid format + domain has MX = pass. No SMTP connection, so not blocked by anti-verification.`
+    : `Bounce-check ${contactsToVerify.length} email(s) using ${methodLabel}?\n\nThis catches: no MX, dead mailboxes, clear 5xx "user unknown" — to reduce bounces.`;
+  if (!confirm(confirmMsg)) {
     return;
   }
 
   isVerifying = true;
   
-  // Update UI to show verifying state
   const verifyBtn = verifySelectedBtn;
   const verifyBtn2Elem = document.getElementById('verifySelectedBtn2');
   
@@ -687,31 +786,38 @@ async function verifySelectedEmails() {
     }
   };
   
-  updateVerifyButtons(`<span class="spinner-small"></span> Verifying...`, true);
+  const totalToVerify = contactsToVerify.length;
+  updateVerifyButtons(`<span class="spinner-small"></span> <span class="verify-btn-progress">Checking 0 / ${totalToVerify}</span>`, true);
+  updateVerificationProgress({ current: 0, total: totalToVerify, email: '' });
 
-  // Mark contacts as verifying in UI
+  [document.getElementById('verificationProgress'), document.getElementById('verificationProgress2')].forEach((el) => {
+    if (el) el.style.display = 'inline-flex';
+  });
+
   contactsToVerify.forEach(c => {
     c.verification_status = 'verifying';
   });
   renderTable();
 
   try {
-    // Prepare email data for API
     const emailData = contactsToVerify.map(c => ({
       id: c.id,
       email: c.email
     }));
 
-    // Call bulk verify
-    const result = await window.electronAPI.verifyEmails(emailData, abstractApiKey);
+    const result = useMx
+      ? await window.electronAPI.verifyEmailsMx(emailData)
+      : useSmtp
+        ? await window.electronAPI.verifyEmailsSmtp(emailData)
+        : await window.electronAPI.verifyEmails(emailData, abstractApiKey);
 
     if (result.success) {
-      // Update local state with results
+      // Update local state with results (match by id, support string or number from API)
       let verifiedCount = 0;
       let invalidCount = 0;
       
       result.results.forEach(res => {
-        const contact = allContacts.find(c => c.id === res.id);
+        const contact = allContacts.find(c => String(c.id) === String(res.id));
         if (contact) {
           contact.email_verified = res.verified;
           contact.verification_status = res.status;
@@ -721,13 +827,22 @@ async function verifySelectedEmails() {
         }
       });
 
+      // Update UI immediately so table and button show "done" without needing refresh
+      updateVerifyButtons(
+        `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg> Verify Emails`,
+        false
+      );
+      renderTable();
+      updateStats();
+      updateBulkActionsBar();
+
       // Count quota exceeded
       const quotaExceededCount = result.quotaExceededCount || result.results.filter(r => r.status === 'quota_exceeded').length;
       
       // Show quota banner if quota was exceeded
       if (result.quotaExceeded || quotaExceededCount > 0) {
         showQuotaExceededBanner({
-          message: `API quota exhausted. ${quotaExceededCount} email(s) could not be verified.`,
+          message: `API quota exhausted. ${quotaExceededCount} email(s) could not be bounce-checked.`,
           verifiedCount: verifiedCount,
           totalAttempted: result.results.length,
           remaining: quotaExceededCount
@@ -735,13 +850,13 @@ async function verifySelectedEmails() {
       }
       
       // Show friendly results
-      let message = `✅ Verification Complete!\n\n`;
+      let message = `✅ Bounce check complete\n\n`;
       message += `📧 Checked: ${result.results.length} emails\n`;
-      message += `✓ Valid: ${verifiedCount}\n`;
-      message += `✗ Invalid/Risky: ${result.results.length - verifiedCount - quotaExceededCount}`;
+      message += `✓ Passed (no MX / 5xx): ${verifiedCount}\n`;
+      message += `✗ Would bounce: ${result.results.length - verifiedCount - quotaExceededCount}`;
       
       if (quotaExceededCount > 0) {
-        message += `\n\n⚠️ QUOTA EXCEEDED: ${quotaExceededCount} email(s) could not be verified`;
+        message += `\n\n⚠️ QUOTA EXCEEDED: ${quotaExceededCount} email(s) could not be bounce-checked`;
         message += `\n\n💡 Solutions:`;
         message += `\n   • Upgrade your Abstract API plan at abstractapi.com`;
         message += `\n   • Use a different API key`;
@@ -763,8 +878,11 @@ async function verifySelectedEmails() {
         <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
         <polyline points="22 4 12 14.01 9 11.01"/>
       </svg>
-      Verify Emails
+      <span class="verify-btn-progress">Check for bounces</span>
     `, false);
+    [document.getElementById('verificationProgress'), document.getElementById('verificationProgress2')].forEach((el) => {
+      if (el) el.style.display = 'none';
+    });
     selectedContacts.clear();
     updateStats();
     renderTable();
@@ -922,26 +1040,28 @@ function sortTable(column) {
   renderTable();
 }
 
-// Export to CSV
-function exportToCSV() {
-  // Determine which contacts to export: selected ones if any, otherwise all filtered
+// Export to CSV (exportAll = true: all filtered/selected; verifiedOnly = true: only email_verified === true)
+function exportToCSV(options) {
+  const { verifiedOnly = false } = options || {};
   let contactsToExport = [];
   
   if (selectedContacts.size > 0) {
-    // Export only selected contacts
     const selectedIds = Array.from(selectedContacts);
     contactsToExport = filteredContacts.filter((contact) => selectedIds.includes(contact.id));
-    
     if (contactsToExport.length === 0) {
       alert("No selected contacts found. Please select contacts to export.");
       return;
     }
-    
-    console.log(`Exporting ${contactsToExport.length} selected contacts out of ${filteredContacts.length} filtered`);
   } else {
-    // Export all filtered contacts if none selected
     contactsToExport = filteredContacts;
-    console.log(`Exporting all ${contactsToExport.length} filtered contacts (none selected)`);
+  }
+  
+  if (verifiedOnly) {
+    contactsToExport = contactsToExport.filter((c) => c.email_verified === true);
+    if (contactsToExport.length === 0) {
+      alert("No verified contacts to export. Run bounce check first.");
+      return;
+    }
   }
   
   if (contactsToExport.length === 0) {
@@ -951,26 +1071,17 @@ function exportToCSV() {
 
   const headers = [
     "Name", "Email", "Company", "Industry", "Keywords", "Job Title", 
-    "Phone", "WhatsApp", "Mobile", "Location", "Source", "Verified", "Website"
+    "Phone", "WhatsApp", "Mobile", "Location", "Source", "LinkedIn", "Bounce-checked", "Website"
   ];
   
   const rows = contactsToExport.map((contact) => {
-    // Extract name from email if available
+    // Website / Google Maps / Google Search: no name — use company only.
     let name = "";
-    if (contact.email) {
-      const emailName = extractNameFromEmail(contact.email);
-      if (emailName && emailName.fullName) {
-        name = emailName.fullName;
-      }
-    }
-    
-    // Fallback logic
-    if (!name) {
-      if (contact.source === "linkedin") {
-        name = `${contact.first_name || ""} ${contact.last_name || ""}`.trim();
-      } else {
-        name = `${contact.first_name || ""} ${contact.last_name || ""}`.trim() || contact.company || contact.first_name || "";
-      }
+    if (isWebsiteLikeSource(contact.source)) {
+      name = (contact.company && !isLikelyNotNameOrCompany(contact.company)) ? contact.company : (contact.email ? extractCompanyFromDomain(contact.email) : null) || "—";
+    } else {
+      const emailName = contact.email ? extractNameFromEmail(contact.email) : null;
+      name = (emailName && emailName.fullName) || `${contact.first_name || ""} ${contact.last_name || ""}`.trim() || contact.company || "—";
     }
 
     return [
@@ -985,6 +1096,7 @@ function exportToCSV() {
       contact.mobile_number || "",
       contact.location || "",
       contact.source || "",
+      contact.linkedin_url || "",
       contact.email_verified ? "Yes" : "No",
       contact.company_website || ""
     ];
@@ -1000,7 +1112,8 @@ function exportToCSV() {
   const a = document.createElement("a");
   a.href = url;
   const countText = selectedContacts.size > 0 ? `_${contactsToExport.length}_selected` : '';
-  a.download = `contacts_export_${new Date().toISOString().split("T")[0]}${countText}.csv`;
+  const verifiedText = verifiedOnly ? '_verified_only' : '';
+  a.download = `contacts_export_${new Date().toISOString().split("T")[0]}${countText}${verifiedText}.csv`;
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -1008,7 +1121,7 @@ function exportToCSV() {
 // Show error
 function showError(message) {
   if (tableBody) {
-    tableBody.innerHTML = `<tr><td colspan="10" style="text-align: center; padding: 40px; color: #f44336;"><strong>Error:</strong> ${message}</td></tr>`;
+    tableBody.innerHTML = `<tr><td colspan="12" style="text-align: center; padding: 40px; color: #f44336;"><strong>Error:</strong> ${message}</td></tr>`;
   }
 }
 
@@ -1101,16 +1214,32 @@ function setupSmtpSettings() {
 
   if (!smtpSettingsBtn || !smtpModal) return;
 
-  // Open modal
+  // Open modal — use a high z-index so it sits above other overlays (e.g. quota banner) and fields stay clickable
   smtpSettingsBtn.addEventListener('click', () => {
     smtpModal.style.display = 'flex';
+    smtpModal.style.zIndex = '10001';
+    smtpModal.style.pointerEvents = 'auto';
   });
+  // When closing, reset z-index so other modals can sit on top as needed
+  const closeSmtpAndReset = () => {
+    smtpModal.style.display = 'none';
+    smtpModal.style.zIndex = '';
+    smtpModal.style.pointerEvents = '';
+  };
+
+  // Open Generate Random Emails from SMTP modal
+  const openEmailGeneratorBtn = document.getElementById('openEmailGeneratorBtn');
+  if (openEmailGeneratorBtn) {
+    openEmailGeneratorBtn.addEventListener('click', () => {
+      closeSmtpAndReset();
+      const genModal = document.getElementById('emailGeneratorModal');
+      if (genModal) genModal.style.display = 'flex';
+    });
+  }
 
   // Close modal
   if (closeSmtpModal) {
-    closeSmtpModal.addEventListener('click', () => {
-      smtpModal.style.display = 'none';
-    });
+    closeSmtpModal.addEventListener('click', closeSmtpAndReset);
   }
 
   // SMTP Presets
@@ -1195,7 +1324,7 @@ function setupSmtpSettings() {
           smtpConnected = true;
           updateSmtpStatusUI();
           alert('✅ SMTP connected successfully!');
-          smtpModal.style.display = 'none';
+          closeSmtpAndReset();
         } else {
           alert('❌ Connection failed: ' + result.error);
         }
@@ -1277,7 +1406,7 @@ function setupEmailComposer() {
   // Live preview update
   const updatePreview = () => {
     const previewSubject = document.getElementById('previewSubject');
-    const previewBody = document.getElementById('previewBody');
+    const previewBody = document.getElementById('emailPreviewBody');
     
     if (!previewSubject || !previewBody) return;
 
@@ -1295,21 +1424,24 @@ function setupEmailComposer() {
 
     // Use selected preview contact if available
     if (previewContact && previewContact.value) {
-      const contact = allContacts.find(c => c.id === previewContact.value);
+      let contact = allContacts.find(c => c.id === previewContact.value);
+      if (!contact && currentCampaignRecipients.length) {
+        contact = currentCampaignRecipients.find(c => (c.id || '') === previewContact.value) ||
+          currentCampaignRecipients[parseInt(previewContact.value.replace('preview-', ''), 10)];
+      }
       if (contact) {
         sampleContact = {
           first_name: contact.first_name || '',
           last_name: contact.last_name || '',
           full_name: (() => {
-            // Try to extract from email first
+            if (isWebsiteLikeSource(contact.source)) {
+              return (contact.company && !isLikelyNotNameOrCompany(contact.company)) ? contact.company : (contact.email ? extractCompanyFromDomain(contact.email) : null) || '—';
+            }
             if (contact.email) {
               const emailName = extractNameFromEmail(contact.email);
-              if (emailName && emailName.fullName) {
-                return emailName.fullName;
-              }
+              if (emailName && emailName.fullName) return emailName.fullName;
             }
-            // Fallback to stored name
-            return [contact.first_name, contact.last_name].filter(Boolean).join(' ');
+            return [contact.first_name, contact.last_name].filter(Boolean).join(' ') || '—';
           })(),
           email: contact.email || '',
           company: contact.company || '',
@@ -1336,6 +1468,8 @@ function setupEmailComposer() {
   }
   if (emailEditor) {
     emailEditor.addEventListener('input', updatePreview);
+    emailEditor.addEventListener('keyup', updatePreview);
+    emailEditor.addEventListener('paste', () => setTimeout(updatePreview, 10));
   }
   if (previewContact) {
     previewContact.addEventListener('change', updatePreview);
@@ -1485,10 +1619,14 @@ function setupEmailComposer() {
       const batchSize = parseInt(document.getElementById('batchSize')?.value || '50');
 
       try {
+        const fromOverride = document.getElementById('fromEmailOverride')?.value?.trim();
+        const replyTo = document.getElementById('replyToEmail')?.value?.trim();
         const result = await window.electronAPI.sendBulkEmails({
           contacts: currentCampaignRecipients,
           subject: subject,
           htmlTemplate: html,
+          from: fromOverride || undefined,
+          replyTo: replyTo || undefined,
           delayBetweenEmails: delay,
           batchSize: batchSize,
           delayBetweenBatches: 60000
@@ -1528,20 +1666,20 @@ function replaceVariables(template, contact) {
   
   let result = template;
   
-  // Standard replacements
+  // Standard replacements (Name, Surname, Company, etc.)
   const replacements = {
     '{{first_name}}': contact.first_name || '',
     '{{last_name}}': contact.last_name || '',
+    '{{surname}}': contact.last_name || '',
     '{{full_name}}': (() => {
-      // Try to extract from email first
+      if (isWebsiteLikeSource(contact.source)) {
+        return (contact.company && !isLikelyNotNameOrCompany(contact.company)) ? contact.company : (contact.email ? extractCompanyFromDomain(contact.email) : null) || '—';
+      }
       if (contact.email) {
         const emailName = extractNameFromEmail(contact.email);
-        if (emailName && emailName.fullName) {
-          return emailName.fullName;
-        }
+        if (emailName && emailName.fullName) return emailName.fullName;
       }
-      // Fallback to stored name
-      return contact.full_name || [contact.first_name, contact.last_name].filter(Boolean).join(' ');
+      return contact.full_name || [contact.first_name, contact.last_name].filter(Boolean).join(' ') || '—';
     })(),
     '{{email}}': contact.email || '',
     '{{company}}': contact.company || '',
@@ -1563,78 +1701,173 @@ function replaceVariables(template, contact) {
   return result;
 }
 
-// Open email composer with selected contacts
-function openEmailComposer() {
-  if (!smtpConnected) {
-    const proceed = confirm('SMTP is not configured. Configure SMTP settings first?');
-    if (proceed) {
-      document.getElementById('smtpModal').style.display = 'flex';
-    }
-    return;
-  }
-
-  const selectedIds = Array.from(selectedContacts);
-  currentCampaignRecipients = allContacts.filter(c => 
-    selectedIds.includes(c.id) && c.email && c.email !== '-'
-  );
-
-  if (currentCampaignRecipients.length === 0) {
-    alert('No contacts with valid emails selected');
-    return;
-  }
-
-  // Update recipients list
+// Refresh the composer recipients list and preview dropdown (after import/paste or open)
+function refreshComposerRecipientsList() {
   const recipientsList = document.getElementById('recipientsList');
   const recipientCount = document.getElementById('recipientCount');
+  const previewSelect = document.getElementById('previewContact');
 
-  if (recipientCount) {
-    recipientCount.textContent = currentCampaignRecipients.length;
-  }
+  if (recipientCount) recipientCount.textContent = currentCampaignRecipients.length;
 
   if (recipientsList) {
     if (currentCampaignRecipients.length === 0) {
-      recipientsList.innerHTML = '<p class="no-recipients">No recipients selected</p>';
+      recipientsList.innerHTML = '<p class="no-recipients">No recipients selected. Select from table or Import CSV / Paste list.</p>';
     } else {
       recipientsList.innerHTML = currentCampaignRecipients.slice(0, 10).map(contact => {
-        // Extract name from email if available
-        let name = "";
-        if (contact.email) {
-          const emailName = extractNameFromEmail(contact.email);
-          if (emailName && emailName.fullName) {
-            name = emailName.fullName;
-          }
+        let name;
+        if (isWebsiteLikeSource(contact.source)) {
+          name = (contact.company && !isLikelyNotNameOrCompany(contact.company)) ? contact.company : (contact.email ? extractCompanyFromDomain(contact.email) : null) || '—';
+        } else {
+          const emailName = contact.email ? extractNameFromEmail(contact.email) : null;
+          name = (emailName && emailName.fullName) || `${contact.first_name || ''} ${contact.last_name || ''}`.trim() || contact.company || '—';
         }
-        
-        if (!name) {
-          name = `${contact.first_name || ''} ${contact.last_name || ''}`.trim() || contact.company || 'Unknown';
-        }
-        
-        const initials = name.split(' ').map(n => n[0]).join('').substring(0, 2).toUpperCase();
-        return `
-          <div class="recipient-item">
-            <div class="recipient-avatar">${initials}</div>
-            <div class="recipient-info">
-              <div class="recipient-name">${name}</div>
-              <div class="recipient-email">${contact.email}</div>
-            </div>
-          </div>
-        `;
+        const initials = (name || '?').split(' ').map(n => n[0]).join('').substring(0, 2).toUpperCase();
+        return `<div class="recipient-item"><div class="recipient-avatar">${initials}</div><div class="recipient-info"><div class="recipient-name">${name}</div><div class="recipient-email">${contact.email}</div></div></div>`;
       }).join('');
-
       if (currentCampaignRecipients.length > 10) {
         recipientsList.innerHTML += `<p style="text-align: center; color: #666; font-size: 12px; margin-top: 8px;">+ ${currentCampaignRecipients.length - 10} more</p>`;
       }
     }
   }
 
-  // Reset progress bar
-  const progressEl = document.getElementById('sendProgress');
-  if (progressEl) progressEl.style.display = 'none';
+  if (previewSelect) {
+    previewSelect.innerHTML = '<option value="">Sample Contact</option>';
+    const source = currentCampaignRecipients.length ? currentCampaignRecipients : allContacts.filter(c => c.email).slice(0, 20);
+    source.slice(0, 20).forEach((contact, idx) => {
+      const id = contact.id || 'preview-' + idx;
+      const name = isWebsiteLikeSource(contact.source)
+        ? ((contact.company && !isLikelyNotNameOrCompany(contact.company)) ? contact.company : (contact.email ? extractCompanyFromDomain(contact.email) : null) || '—')
+        : (`${contact.first_name || ''} ${contact.last_name || ''}`.trim() || (contact.company && !isLikelyNotNameOrCompany(contact.company) ? contact.company : null) || (contact.email ? extractCompanyFromDomain(contact.email) : null) || '—');
+      const opt = document.createElement('option');
+      opt.value = id;
+      opt.textContent = `${name} (${contact.email})`;
+      previewSelect.appendChild(opt);
+    });
+  }
+}
 
-  // Show composer
+// Parse CSV line (handles quoted fields)
+function parseCsvLine(line) {
+  const out = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '"') {
+      inQuotes = !inQuotes;
+    } else if ((c === ',' && !inQuotes) || c === '\t') {
+      out.push(cur.trim());
+      cur = '';
+    } else {
+      cur += c;
+    }
+  }
+  out.push(cur.trim());
+  return out;
+}
+
+// Build contacts from CSV text (header: email, first_name, last_name, company, job_title, etc.)
+function parseCsvToContacts(csvText) {
+  const lines = csvText.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (lines.length < 2) return [];
+  const headerLine = (lines[0] || '').replace(/^\uFEFF/, '').trim();
+  const header = parseCsvLine(headerLine).map(h => (h || '').toLowerCase().replace(/\s+/g, '_').replace(/-/g, '_'));
+  const emailIdx = header.findIndex(h => h === 'email' || h === 'e_mail' || h === 'email_address' || h === 'emailaddress' || h === 'mail');
+  if (emailIdx < 0) return [];
+  const firstIdx = header.findIndex(h => h === 'first_name' || h === 'firstname' || h === 'first');
+  const lastIdx = header.findIndex(h => h === 'last_name' || h === 'lastname' || h === 'last' || h === 'surname');
+  const companyIdx = header.findIndex(h => h === 'company');
+  const jobIdx = header.findIndex(h => h === 'job_title' || h === 'jobtitle' || h === 'title');
+  const contacts = [];
+  for (let i = 1; i < lines.length; i++) {
+    const row = parseCsvLine(lines[i]);
+    const email = (row[emailIdx] || '').trim();
+    if (!email || !email.includes('@')) continue;
+    contacts.push({
+      id: 'import-' + i,
+      email,
+      first_name: (firstIdx >= 0 ? row[firstIdx] : '').trim(),
+      last_name: (lastIdx >= 0 ? row[lastIdx] : '').trim(),
+      company: (companyIdx >= 0 ? row[companyIdx] : '').trim(),
+      job_title: (jobIdx >= 0 ? row[jobIdx] : '').trim(),
+      location: (header.indexOf('location') >= 0 ? row[header.indexOf('location')] : '').trim(),
+      industry: (header.indexOf('industry') >= 0 ? row[header.indexOf('industry')] : '').trim()
+    });
+  }
+  return contacts;
+}
+
+// Open email composer with selected contacts (or empty to add via Import/Paste)
+function openEmailComposer() {
+  if (!smtpConnected) {
+    const proceed = confirm('SMTP is not configured. Configure SMTP settings first?');
+    if (proceed) {
+      const m = document.getElementById('smtpModal');
+      if (m) {
+        m.style.display = 'flex';
+        m.style.zIndex = '10001';
+        m.style.pointerEvents = 'auto';
+      }
+    }
+    return;
+  }
+
+  const selectedIds = Array.from(selectedContacts);
+  currentCampaignRecipients = selectedIds.length
+    ? allContacts.filter(c => selectedIds.includes(c.id) && c.email && c.email !== '-')
+    : [];
+
+  refreshComposerRecipientsList();
+  document.getElementById('sendProgress').style.display = 'none';
   const composerModal = document.getElementById('emailComposerModal');
-  if (composerModal) {
-    composerModal.style.display = 'flex';
+  if (composerModal) composerModal.style.display = 'flex';
+
+  setupComposerCsvImport();
+}
+
+function setupComposerCsvImport() {
+  const importBtn = document.getElementById('importCsvRecipientsBtn');
+  const fileInput = document.getElementById('importCsvRecipientsFile');
+  const pasteBtn = document.getElementById('pasteRecipientsBtn');
+
+  if (importBtn && fileInput) {
+    importBtn.onclick = () => fileInput.click();
+    fileInput.onchange = () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const contacts = parseCsvToContacts(e.target.result);
+        if (contacts.length) {
+          currentCampaignRecipients = contacts;
+          refreshComposerRecipientsList();
+          alert(`Imported ${contacts.length} recipient(s) from CSV.`);
+        } else {
+          alert('No valid rows with email column found. CSV should have header with "email" and optional first_name, last_name, company, job_title.');
+        }
+      };
+      reader.readAsText(file);
+      fileInput.value = '';
+    };
+  }
+
+  if (pasteBtn) {
+    pasteBtn.onclick = () => {
+      const pasted = prompt('Paste CSV (header with email) or one email per line:');
+      if (!pasted || !pasted.trim()) return;
+      let contacts = parseCsvToContacts(pasted);
+      if (contacts.length === 0) {
+        const lines = pasted.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+        contacts = lines.filter(l => l.includes('@')).map((email, i) => ({ id: 'paste-' + i, email: email.trim(), first_name: '', last_name: '', company: '', job_title: '' }));
+      }
+      if (contacts.length) {
+        currentCampaignRecipients = contacts;
+        refreshComposerRecipientsList();
+        alert(`Added ${contacts.length} recipient(s).`);
+      } else {
+        alert('No valid emails found.');
+      }
+    };
   }
 }
 
@@ -1645,8 +1878,16 @@ function setupEmailGenerator() {
   const closeGeneratorBtn = document.getElementById('closeGeneratorBtn');
   const generateEmailsBtn = document.getElementById('generateEmailsBtn');
   const copyGeneratedBtn = document.getElementById('copyGeneratedBtn');
+  const openEmailGeneratorNavBtn = document.getElementById('openEmailGeneratorNavBtn');
 
   if (!generatorModal) return;
+
+  // Open from sidebar nav
+  if (openEmailGeneratorNavBtn) {
+    openEmailGeneratorNavBtn.addEventListener('click', () => {
+      generatorModal.style.display = 'flex';
+    });
+  }
 
   // Close handlers
   if (closeGeneratorModal) {
@@ -1714,6 +1955,23 @@ function setupEmailGenerator() {
       }
     });
   }
+
+  // Use first generated email as From in composer
+  const useFirstAsFromBtn = document.getElementById('useFirstAsFromBtn');
+  if (useFirstAsFromBtn) {
+    useFirstAsFromBtn.addEventListener('click', () => {
+      const textarea = document.getElementById('generatedEmailsList');
+      const fromInput = document.getElementById('fromEmailOverride');
+      if (textarea && fromInput) {
+        const first = textarea.value.trim().split(/\r?\n/)[0];
+        if (first) {
+          fromInput.value = first;
+          useFirstAsFromBtn.textContent = 'Done!';
+          setTimeout(() => { useFirstAsFromBtn.textContent = 'Use first as From (composer)'; }, 2000);
+        }
+      }
+    });
+  }
 }
 
 // Switch to campaigns view
@@ -1736,12 +1994,112 @@ function showContactsView() {
   const tableContainer = document.getElementById('tableContainer');
   const filtersBar = document.getElementById('filtersBar');
   const campaignsView = document.getElementById('campaignsView');
+  const searchHistoryView = document.getElementById('searchHistoryView');
+  const searchHistoryBackBar = document.getElementById('searchHistoryBackBar');
 
   if (campaignsView) campaignsView.style.display = 'none';
+  if (searchHistoryView) searchHistoryView.style.display = 'none';
+  if (searchHistoryBackBar) searchHistoryBackBar.style.display = 'none';
   if (filtersBar) filtersBar.style.display = 'flex';
   if (tableContainer) tableContainer.style.display = 'block';
   
   renderTable();
+}
+
+// Show Search History view (list of runs, or table when a run is selected)
+function showSearchHistoryView() {
+  const tableContainer = document.getElementById('tableContainer');
+  const filtersBar = document.getElementById('filtersBar');
+  const campaignsView = document.getElementById('campaignsView');
+  const searchHistoryView = document.getElementById('searchHistoryView');
+  const searchHistoryBackBar = document.getElementById('searchHistoryBackBar');
+  const searchHistoryList = document.getElementById('searchHistoryList');
+  const searchHistoryEmpty = document.getElementById('searchHistoryEmpty');
+
+  if (campaignsView) campaignsView.style.display = 'none';
+  if (filtersBar) filtersBar.style.display = 'none';
+
+  if (selectedSearchRunId) {
+    // Showing a run's leads in the table
+    if (searchHistoryView) searchHistoryView.style.display = 'none';
+    if (searchHistoryBackBar) searchHistoryBackBar.style.display = 'block';
+    if (tableContainer) tableContainer.style.display = 'block';
+    const caption = document.getElementById('searchHistoryRunCaption');
+    if (caption) caption.textContent = `Showing ${filteredContacts.length} lead(s) from: "${selectedSearchRunKeyword || selectedSearchRunId}"`;
+    renderTable();
+    if (contactCount) contactCount.textContent = `${filteredContacts.length} contact${filteredContacts.length !== 1 ? 's' : ''}`;
+  } else {
+    // Showing list of runs
+    if (searchHistoryBackBar) searchHistoryBackBar.style.display = 'none';
+    if (tableContainer) tableContainer.style.display = 'none';
+    if (searchHistoryView) searchHistoryView.style.display = 'block';
+    loadSearchHistoryRuns();
+  }
+}
+
+async function loadSearchHistoryRuns() {
+  const listEl = document.getElementById('searchHistoryList');
+  const emptyEl = document.getElementById('searchHistoryEmpty');
+  if (!listEl || !emptyEl) return;
+  try {
+    const result = await window.electronAPI.getSearchHistory();
+    const runs = (result && result.runs) ? result.runs : [];
+    if (runs.length === 0) {
+      listEl.style.display = 'none';
+      listEl.innerHTML = '';
+      emptyEl.style.display = 'block';
+      return;
+    }
+    emptyEl.style.display = 'none';
+    listEl.style.display = 'block';
+    const sourceLabels = { linkedin: 'LinkedIn', google_maps: 'Google Maps', google_search: 'Google Search', website: 'Websites' };
+    listEl.innerHTML = runs.map((run) => {
+      const date = run.createdAt ? new Date(run.createdAt).toLocaleString() : '';
+      const sourceLabel = sourceLabels[run.source] || run.source || 'Search';
+      return `
+        <div class="search-history-run-card" data-run-id="${run.runId}" data-keyword="${(run.keyword || '').replace(/"/g, '&quot;')}">
+          <div class="search-history-run-main">
+            <span class="search-history-run-source">${escapeHtml(sourceLabel)}</span>
+            <span class="search-history-run-keyword">${escapeHtml(run.keyword || 'Search')}</span>
+          </div>
+          <div class="search-history-run-meta">${run.leadCount || 0} lead(s) · ${date}</div>
+          <button type="button" class="btn-secondary btn-view-leads" data-run-id="${run.runId}" data-keyword="${(run.keyword || '').replace(/"/g, '&quot;')}">View leads</button>
+        </div>
+      `;
+    }).join('');
+
+    listEl.querySelectorAll('.btn-view-leads').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const runId = btn.dataset.runId;
+        const keyword = btn.dataset.keyword || '';
+        const res = await window.electronAPI.loadContactsByRunId(runId);
+        if (res.needsMigration) {
+          alert('To view leads by search, add the search_run_id column in Supabase. Run: ALTER TABLE contacts ADD COLUMN IF NOT EXISTS search_run_id VARCHAR(100);');
+          return;
+        }
+        if (!res.success || !res.contacts) {
+          filteredContacts = [];
+        } else {
+          filteredContacts = res.contacts;
+        }
+        selectedSearchRunId = runId;
+        selectedSearchRunKeyword = keyword;
+        showSearchHistoryView();
+      });
+    });
+  } catch (e) {
+    console.error('Load search history:', e);
+    listEl.innerHTML = '';
+    emptyEl.style.display = 'block';
+    emptyEl.querySelector('p').textContent = 'Could not load search history.';
+  }
+}
+
+function escapeHtml(s) {
+  if (!s) return '';
+  const div = document.createElement('div');
+  div.textContent = s;
+  return div.innerHTML;
 }
 
 // Load campaigns
@@ -1815,7 +2173,47 @@ function setupEventListeners() {
   if (verificationFilter) verificationFilter.addEventListener("change", applyFilters);
   if (clearFiltersBtn) clearFiltersBtn.addEventListener("click", clearFilters);
   if (refreshBtn) refreshBtn.addEventListener("click", loadContacts);
-  if (exportBtn) exportBtn.addEventListener("click", exportToCSV);
+  const clearAllDataBtn = document.getElementById("clearAllDataBtn");
+  if (clearAllDataBtn) {
+    clearAllDataBtn.addEventListener("click", async () => {
+      if (!confirm("Clear all contacts from the database? All navigation counts will go to 0. This cannot be undone.")) return;
+      try {
+        const result = await window.electronAPI.clearAllContacts();
+        if (result.success) {
+          ensureZeroState();
+          await loadContacts();
+          alert(result.deleted ? `Cleared ${result.deleted} contact(s). All counts are now 0.` : "Database is empty. All counts are 0.");
+        } else {
+          alert("Failed to clear data: " + (result.error || "Unknown error"));
+        }
+      } catch (e) {
+        alert("Error: " + (e && e.message ? e.message : String(e)));
+      }
+    });
+  }
+  const exportDropdown = document.querySelector('.export-dropdown');
+  if (exportBtn) {
+    const exportMenu = document.getElementById('exportMenu');
+    exportBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (exportMenu) exportMenu.style.display = exportMenu.style.display === 'block' ? 'none' : 'block';
+    });
+  }
+  document.getElementById('exportAllBtn')?.addEventListener('click', () => {
+    const m = document.getElementById('exportMenu');
+    if (m) m.style.display = 'none';
+    exportToCSV({ verifiedOnly: false });
+  });
+  document.getElementById('exportVerifiedOnlyBtn')?.addEventListener('click', () => {
+    const m = document.getElementById('exportMenu');
+    if (m) m.style.display = 'none';
+    exportToCSV({ verifiedOnly: true });
+  });
+  document.addEventListener('click', (e) => {
+    if (exportDropdown && exportDropdown.contains(e.target)) return;
+    const m = document.getElementById('exportMenu');
+    if (m) m.style.display = 'none';
+  });
 
   // Select all checkbox
   if (selectAllCheckbox) {
@@ -1859,7 +2257,9 @@ function setupEventListeners() {
         companies: "Companies",
         linkedin: "LinkedIn Contacts",
         googlemaps: "Google Maps Contacts",
+        googlesearch: "Google Search Contacts",
         websites: "Website Contacts",
+        "search-history": "Search History",
         campaigns: "Email Campaigns"
       };
       
@@ -1867,12 +2267,26 @@ function setupEventListeners() {
       
       if (currentView === 'campaigns') {
         showCampaignsView();
+      } else if (currentView === 'search-history') {
+        selectedSearchRunId = null;
+        selectedSearchRunKeyword = null;
+        showSearchHistoryView();
       } else {
         showContactsView();
         applyFilters();
       }
     });
   });
+
+  // Search History: Back to list
+  const backToSearchHistoryBtn = document.getElementById('backToSearchHistoryBtn');
+  if (backToSearchHistoryBtn) {
+    backToSearchHistoryBtn.addEventListener('click', () => {
+      selectedSearchRunId = null;
+      selectedSearchRunKeyword = null;
+      showSearchHistoryView();
+    });
+  }
 
   // Open scraper buttons
   if (openScraperBtn) openScraperBtn.addEventListener("click", () => window.electronAPI.openScraper());
@@ -1905,11 +2319,8 @@ function setupEventListeners() {
   
   const openNewCampaign = () => {
     currentCampaignRecipients = [];
-    const recipientsList = document.getElementById('recipientsList');
-    const recipientCount = document.getElementById('recipientCount');
-    if (recipientsList) recipientsList.innerHTML = '<p class="no-recipients">No recipients selected. Select contacts from People view first.</p>';
-    if (recipientCount) recipientCount.textContent = '0';
-    
+    refreshComposerRecipientsList();
+    setupComposerCsvImport();
     const composerModal = document.getElementById('emailComposerModal');
     if (composerModal) composerModal.style.display = 'flex';
   };
@@ -2093,12 +2504,14 @@ function handleCsvFile(file) {
       return;
     }
 
-    // Parse header
-    const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase().trim().replace(/\s+/g, '_'));
+    // Parse header (strip BOM if present)
+    const headerLine = lines[0].replace(/^\uFEFF/, '').trim();
+    const headers = parseCSVLine(headerLine).map(h => h.toLowerCase().trim().replace(/\s+/g, '_').replace(/-/g, '_'));
     
-    // Check for required email column
-    if (!headers.includes('email')) {
-      alert('CSV must have an "email" column');
+    // Find email column: accept "email", "e_mail", "e-mail" -> email, "email_address"
+    const emailCol = headers.findIndex(h => h === 'email' || h === 'e_mail' || h === 'email_address' || h === 'emailaddress' || h === 'mail');
+    if (emailCol < 0) {
+      alert('CSV must have an "email" column (or "E-mail", "email_address")');
       return;
     }
 
@@ -2110,15 +2523,17 @@ function handleCsvFile(file) {
       
       const row = {};
       headers.forEach((header, index) => {
-        row[header] = values[index]?.trim() || '';
+        row[header] = (values[index] != null ? String(values[index]) : '').trim();
       });
+      const emailVal = (values[emailCol] != null ? String(values[emailCol]) : '').trim();
+      const email = emailVal || row.email || row.e_mail || row.email_address || '';
 
-      // Only include rows with email
-      if (row.email) {
+      // Only include rows with valid email
+      if (email && email.includes('@')) {
         csvData.push({
-          first_name: row.first_name || row.firstname || row.name?.split(' ')[0] || '',
-          last_name: row.last_name || row.lastname || row.name?.split(' ').slice(1).join(' ') || '',
-          email: row.email,
+          first_name: row.first_name || row.firstname || (row.name && row.name.split(' ')[0]) || '',
+          last_name: row.last_name || row.lastname || (row.name && row.name.split(' ').slice(1).join(' ')) || '',
+          email: email,
           company: row.company || row.organization || null,
           job_title: row.job_title || row.jobtitle || row.title || row.position || null,
           phone_number: row.phone_number || row.phone || row.tel || null,
@@ -2166,7 +2581,7 @@ function showCsvPreview(headers, data) {
   const preview = document.getElementById('csvPreview');
   const previewCount = document.getElementById('previewCount');
   const previewHead = document.getElementById('previewHead');
-  const previewBody = document.getElementById('previewBody');
+  const previewBody = document.getElementById('csvPreviewBody');
   const importBtn = document.getElementById('importCsvBtn');
 
   if (!preview || !previewCount || !previewHead || !previewBody) return;
@@ -2220,12 +2635,12 @@ function showQuotaExceededBanner(data) {
   if (!banner || !bannerMessage) return;
   
   // Set message
-  let message = data.message || 'The Abstract Email Reputation API quota has been exhausted.';
+  let message = data.message || 'The Abstract API quota for bounce-checking has been exhausted.';
   if (data.verifiedCount !== undefined) {
-    message += ` ${data.verifiedCount} email(s) were verified before quota was reached.`;
+    message += ` ${data.verifiedCount} email(s) were bounce-checked before quota was reached.`;
   }
   if (data.remaining !== undefined && data.remaining > 0) {
-    message += ` ${data.remaining} email(s) could not be verified.`;
+    message += ` ${data.remaining} email(s) could not be bounce-checked.`;
   }
   message += ' Upgrade your plan or use a different API key to continue.';
   

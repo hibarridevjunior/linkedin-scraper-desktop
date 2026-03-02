@@ -1,6 +1,13 @@
+/**
+ * Google Maps scraper — one job config; returns contacts; no Supabase.
+ * Job boundaries: one browser per job; browser closed after job. Cancellation checks between businesses.
+ * IPC progress: only counts/phase via progressCallback; no contact arrays or Playwright refs.
+ */
+
 const { launchBrowser } = require('./browser-helper');
-const { createClient } = require('@supabase/supabase-js');
-const { extractEmails, filterBusinessEmails, getBestEmail, extractCompanyFromDomain } = require('./email-extractor');
+const { extractEmails, extractMailtoEmails, filterBusinessEmails, getBestEmail, extractCompanyFromDomain } = require('./email-extractor');
+const { mapsDelay } = require('./cooldown-config');
+const { getContactLinkUrlsFromPage } = require('./website-scraper');
 
 /**
  * Generate potential website domains based on business name
@@ -38,15 +45,6 @@ function generatePotentialDomains(businessName) {
   return domains;
 }
 
-const SUPABASE_URL = 'https://cvecdppmqcxgofetrfir.supabase.co';
-const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN2ZWNkcHBtcWN4Z29mZXRyZmlyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc1ODQ3NDYsImV4cCI6MjA4MzE2MDc0Nn0.GjF5fvkdeDo8kjso3RxQTVEroMO6-hideVgPAYWDyvc';
-
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-
-function randomSleep(min = 1000, max = 3000) {
-  const ms = Math.floor(Math.random() * (max - min + 1)) + min;
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
 
 // Helper function to truncate strings to database column limits
 function truncateField(value, maxLength = 100) {
@@ -129,6 +127,7 @@ function extractEmailsLocal(text, html = '') {
 async function enrichFromWebsite(page, websiteUrl, businessName, progressCallback) {
   const enrichedData = {
     emails: [],
+    mailtoEmails: [],
     description: '',
     additionalPhones: []
   };
@@ -144,7 +143,7 @@ async function enrichFromWebsite(page, websiteUrl, businessName, progressCallbac
     url = url.replace(/\/$/, '');
 
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
-    await randomSleep(500, 800); // Small delay for page stability
+    await mapsDelay('pageStability');
 
     // Get meta description
     const metaDescription = await page.evaluate(() => {
@@ -172,39 +171,18 @@ async function enrichFromWebsite(page, websiteUrl, businessName, progressCallbac
     let allText = await page.evaluate(() => document.body.innerText || '');
     let allHtml = await page.evaluate(() => document.body.innerHTML || '');
 
-    // Find and visit Contact page
-    const contactLinks = await page.evaluate(() => {
-      const links = Array.from(document.querySelectorAll('a'));
-      const contactUrls = [];
-      
-      links.forEach(link => {
-        const href = (link.href || '').toLowerCase();
-        const text = (link.innerText || '').toLowerCase();
-        
-        if (href.includes('contact') || text.includes('contact') ||
-            href.includes('get-in-touch') || text.includes('get in touch') ||
-            href.includes('reach-us') || text.includes('reach us')) {
-          if (link.href && !contactUrls.includes(link.href)) {
-            contactUrls.push(link.href);
-          }
-        }
-      });
-      
-      return contactUrls.slice(0, 2);
-    });
-
-    // Visit contact page if found
-    if (contactLinks.length > 0) {
+    // Find and visit Contact page (use shared helper: links found on page first)
+    const contactLinks = await getContactLinkUrlsFromPage(page, url, 5);
+    for (const contactUrl of contactLinks.slice(0, 2)) {
       try {
-        await page.goto(contactLinks[0], { waitUntil: 'domcontentloaded', timeout: 15000 });
-        await randomSleep(500, 800); // Small delay for page stability
-        
+        await page.goto(contactUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        await mapsDelay('pageStability');
         const contactText = await page.evaluate(() => document.body.innerText || '');
         const contactHtml = await page.evaluate(() => document.body.innerHTML || '');
         allText += '\n' + contactText;
         allHtml += '\n' + contactHtml;
       } catch (e) {
-        // Contact page failed, continue with what we have
+        // Contact page failed, continue with next
       }
     }
 
@@ -252,7 +230,7 @@ async function enrichFromWebsite(page, websiteUrl, businessName, progressCallbac
     if (aboutLinks.length > 0) {
       try {
         await page.goto(aboutLinks[0], { waitUntil: 'domcontentloaded', timeout: 15000 });
-        await randomSleep(500, 800); // Small delay for page stability
+        await mapsDelay('pageStability');
         
         const aboutDesc = await page.evaluate(() => {
           const paragraphs = Array.from(document.querySelectorAll('p'));
@@ -280,7 +258,7 @@ async function enrichFromWebsite(page, websiteUrl, businessName, progressCallbac
     if (teamLinks.length > 0) {
       try {
         await page.goto(teamLinks[0], { waitUntil: 'domcontentloaded', timeout: 15000 });
-        await randomSleep(500, 800); // Small delay for page stability
+        await mapsDelay('pageStability');
         
         const teamText = await page.evaluate(() => document.body.innerText || '');
         const teamHtml = await page.evaluate(() => document.body.innerHTML || '');
@@ -291,11 +269,9 @@ async function enrichFromWebsite(page, websiteUrl, businessName, progressCallbac
       }
     }
 
-    // Extract emails and phones from all collected text
-    // Use centralized email extractor with business email filtering
-    enrichedData.emails = extractEmails(allText, allHtml);
-    // Filter to business emails only (excludes gmail, yahoo, etc.)
-    enrichedData.emails = filterBusinessEmails(enrichedData.emails);
+    // Extract emails and phones from all collected text (max 2 emails per website)
+    enrichedData.emails = filterBusinessEmails(extractEmails(allText, allHtml)).slice(0, 2);
+    enrichedData.mailtoEmails = extractMailtoEmails(allHtml);
     enrichedData.additionalPhones = extractPhoneNumbers(allText);
 
   } catch (error) {
@@ -309,13 +285,17 @@ async function enrichFromWebsite(page, websiteUrl, businessName, progressCallbac
 // MAIN GOOGLE MAPS SCRAPER WITH AUTO-ENRICHMENT
 // ============================================
 
-async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = null, keywords = null, progressCallback, options = {}) {
+/**
+ * @param {Object} config - { searchQuery, maxResults, industry, keywords, enableEnrichment }
+ * @param {Function} progressCallback - Progress callback (counts/phase only)
+ * @param {Object} options - { checkCancellation }
+ */
+async function runGoogleMapsScraper(config, progressCallback, options = {}) {
+  const { searchQuery, maxResults = 50, industry = null, keywords = null, enableEnrichment: configEnrich = true } = config || {};
+  const enableEnrichment = configEnrich !== false;
+  const checkCancellation = options.checkCancellation || (() => false);
   const scrapedBusinesses = [];
   let browser;
-  
-  // Options for enrichment
-  const enableEnrichment = options.enableEnrichment !== false; // Default: true
-  const checkCancellation = options.checkCancellation || (() => false);
   
   try {
     progressCallback({ 
@@ -400,7 +380,7 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
     await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForSelector('[role="feed"]', { timeout: 15000 }).catch(() => {});
     // Small delay to let map tiles load
-    await randomSleep(1000, 1500);
+    await mapsDelay('tilesLoad');
     
     progressCallback({ 
       status: 'Phase 1: Scrolling to collect business listings...', 
@@ -470,7 +450,7 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
       });
       
       // Longer delay to allow Google Maps to load more results
-      await randomSleep(2500, 3500);
+      await mapsDelay('scrollMore');
       scrollAttempts++;
     }
     
@@ -503,7 +483,7 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
       await page.goto(fallbackUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
       await page.waitForSelector('[role="feed"]', { timeout: 15000 }).catch(() => {});
       // Small delay to let map tiles load
-      await randomSleep(1000, 1500);
+      await mapsDelay('tilesLoad');
       
       // Try to get links again
       const fallbackLinks = await page.evaluate(() => {
@@ -558,7 +538,7 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
       try {
         await page.goto(linksToProcess[i], { waitUntil: 'domcontentloaded', timeout: 30000 });
         await page.waitForSelector('h1', { timeout: 10000 }).catch(() => {});
-        await randomSleep(500, 800); // Small delay for page stability
+        await mapsDelay('pageStability');
         
         const businessData = await page.evaluate(() => {
           const getName = () => document.querySelector('h1')?.innerText?.trim() || '';
@@ -667,7 +647,7 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
         console.log(`Error getting Maps data for business ${i + 1}: ${error.message}`);
       }
       
-      await randomSleep(1000, 2000);
+      await mapsDelay('betweenVisits');
     }
     
     console.log(`Phase 1 complete: Collected ${businessesData.length} businesses from Maps (requested ${linksToProcess.length})`);
@@ -695,66 +675,51 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
           });
           
           // Get enriched data from website
-          let enrichedData = { emails: [], description: '', additionalPhones: [] };
+          let enrichedData = { emails: [], mailtoEmails: [], description: '', additionalPhones: [] };
           
           try {
-            // If email found directly on Maps page, add it
             if (business.emailFromMaps) {
               enrichedData.emails.push(business.emailFromMaps);
             }
             
-            // Try to enrich from website if available
             if (business.website) {
               try {
                 const websiteData = await enrichFromWebsite(page, business.website, business.name, progressCallback);
-                // Merge website emails with Maps page email
-                enrichedData.emails = [...enrichedData.emails, ...websiteData.emails];
+                enrichedData.emails = [...enrichedData.emails, ...(websiteData.emails || []).slice(0, 2)];
+                enrichedData.mailtoEmails = websiteData.mailtoEmails || [];
                 enrichedData.description = websiteData.description || enrichedData.description;
                 enrichedData.additionalPhones = [...enrichedData.additionalPhones, ...websiteData.additionalPhones];
               } catch (e) {
                 console.log(`Enrichment failed for ${business.name} website ${business.website}: ${e.message}`);
-                // Continue with Maps data only
               }
             } else if (!enrichedData.emails.length) {
-              // No website listed AND no email found on Maps page
-              // Try to find website by checking common domain patterns (only if no emails found yet)
               const potentialDomains = generatePotentialDomains(business.name);
-              
-              // Only try the most likely domain (.com)
               if (potentialDomains.length > 0) {
                 try {
                   const testUrl = `https://${potentialDomains[0]}`;
-                  // Quick check - shorter timeout
                   const response = await page.goto(testUrl, { waitUntil: 'domcontentloaded', timeout: 8000 }).catch(() => null);
-                  
                   if (response && response.ok()) {
-                    // Website exists! Extract emails (quick extraction only)
-                    await randomSleep(500, 800); // Small delay for page content to load
+                    await mapsDelay('pageStability');
                     const pageText = await page.evaluate(() => document.body.innerText || '');
                     const pageHtml = await page.evaluate(() => document.body.innerHTML || '');
                     const foundEmails = extractEmails(pageText, pageHtml);
-                    const businessEmails = filterBusinessEmails(foundEmails);
+                    const businessEmails = filterBusinessEmails(foundEmails).slice(0, 2);
                     enrichedData.emails = [...enrichedData.emails, ...businessEmails];
+                    enrichedData.mailtoEmails = extractMailtoEmails(pageHtml);
                   }
                 } catch (e) {
-                  // Website doesn't exist or failed, continue
+                  // continue
                 }
               }
             }
           } catch (e) {
             console.log(`Error during enrichment for ${business.name}: ${e.message}`);
-            // Continue with Maps data only
           }
           
-          // Remove duplicates and filter to business emails only
-          enrichedData.emails = filterBusinessEmails([...new Set(enrichedData.emails.map(e => e.toLowerCase()))]);
-          
-          // Combine Google Maps data with website data
+          enrichedData.emails = filterBusinessEmails([...new Set(enrichedData.emails.map(e => e.toLowerCase()))]).slice(0, 2);
           const phone = cleanPhoneNumber(business.phone);
           const isMobile = isMobileNumber(phone);
-          
-          // Get best email (prefer business email) - use centralized function
-          const primaryEmail = getBestEmail(enrichedData.emails) || null;
+          const primaryEmail = getBestEmail(enrichedData.emails, { mailtoEmails: enrichedData.mailtoEmails || [] }) || null;
           
           // Combine description from Maps category + website
           let description = enrichedData.description || '';
@@ -762,9 +727,10 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
             description = business.category + (description ? '. ' + description : '');
           }
           
+          // Website/Maps: no person name. Name = page title/h1 only; Company = business name. Leave first_name/last_name empty.
           const completeRecord = {
             company: truncateField(business.name, 100),
-            first_name: truncateField(business.name, 100),
+            first_name: '',
             last_name: '',
             email: primaryEmail,
             phone_number: !isMobile ? phone : null,
@@ -796,7 +762,7 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
           
           scrapedBusinesses.push({
             company: truncateField(business.name, 100),
-            first_name: truncateField(business.name, 100),
+            first_name: '',
             last_name: '',
             email: business.emailFromMaps || null,
             phone_number: !isMobile ? phone : null,
@@ -818,7 +784,7 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
         }
         
         // Reduced delay between enrichments
-        await randomSleep(400, 700);
+        await mapsDelay('betweenEnrich');
       }
       console.log(`Phase 2: Enrichment complete. Total businesses in scrapedBusinesses: ${scrapedBusinesses.length}`);
     } else {
@@ -830,7 +796,7 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
         
         scrapedBusinesses.push({
           company: truncateField(business.name, 100),
-          first_name: truncateField(business.name, 100),
+          first_name: '',
           last_name: '',
           email: null,
           phone_number: !isMobile ? phone : null,
@@ -854,76 +820,7 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
     
     console.log(`Before Phase 3: scrapedBusinesses.length = ${scrapedBusinesses.length}, businessesData.length = ${businessesData.length}`);
     
-    // ========== PHASE 3: SAVE TO DATABASE ==========
-    if (scrapedBusinesses.length > 0) {
-      progressCallback({ 
-        status: `Phase 3: Saving ${scrapedBusinesses.length} businesses to database...`, 
-        profilesFound: linksToProcess.length, 
-        profilesScraped: scrapedBusinesses.length,
-        phase: 'save'
-      });
-      
-      // Remove duplicates by company name first
-      const uniqueByCompany = [...new Map(scrapedBusinesses.map(b => [b.company, b])).values()];
-      
-      // Then remove duplicates by email (for upsert operations)
-      // Keep the first occurrence of each email
-      const seenEmails = new Set();
-      const uniqueByEmail = [];
-      const duplicatesByEmail = [];
-      
-      for (const business of uniqueByCompany) {
-        if (business.email) {
-          const emailLower = business.email.toLowerCase();
-          if (seenEmails.has(emailLower)) {
-            duplicatesByEmail.push(business);
-          } else {
-            seenEmails.add(emailLower);
-            uniqueByEmail.push(business);
-          }
-        } else {
-          uniqueByEmail.push(business);
-        }
-      }
-      
-      console.log(`Deduplication: ${scrapedBusinesses.length} total -> ${uniqueByCompany.length} by company -> ${uniqueByEmail.length} by email (${duplicatesByEmail.length} duplicates removed)`);
-      
-      // Separate records with emails (can upsert) from those without (must insert)
-      const withEmail = uniqueByEmail.filter(b => b.email);
-      const withoutEmail = uniqueByEmail.filter(b => !b.email);
-      
-      // Upsert records with email
-      if (withEmail.length > 0) {
-        // Debug: Log first record to verify search_query is included
-        if (withEmail.length > 0) {
-          console.log(`Saving ${withEmail.length} contacts with email. First record search_query: "${withEmail[0].search_query}"`);
-        }
-        
-        const { error: upsertError } = await supabase
-          .from('contacts')
-          .upsert(withEmail, { onConflict: 'email' });
-        
-        if (upsertError) {
-          console.error('Supabase upsert error:', upsertError);
-        } else {
-          console.log(`Successfully upserted ${withEmail.length} contacts with search_query field`);
-        }
-      }
-      
-      // Insert records without email
-      if (withoutEmail.length > 0) {
-        const { error: insertError } = await supabase
-          .from('contacts')
-          .insert(withoutEmail);
-        
-        if (insertError) {
-          console.error('Supabase insert error:', insertError);
-        }
-      }
-      
-      console.log(`Successfully saved ${uniqueByEmail.length} businesses (${withEmail.length} with emails)`);
-    }
-    
+    // Return contacts; main/runner handles Supabase. No contact arrays over IPC.
     // Calculate stats
     const emailCount = scrapedBusinesses.filter(b => b.email).length;
     const phoneCount = scrapedBusinesses.filter(b => b.phone_number || b.mobile_number).length;
@@ -943,7 +840,7 @@ async function runGoogleMapsScraper(searchQuery, maxResults = 50, industry = nul
       }
     });
     
-    await randomSleep(500, 1000); // Reduced final delay
+    await mapsDelay('final');
     await browser.close();
     
     console.log(`✓ Google Maps scraper returning ${scrapedBusinesses.length} businesses to main process`);

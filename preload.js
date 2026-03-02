@@ -1,20 +1,31 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  // Scraping
+  // Fast mode: set SCRAPE_FAST=1 when starting the app for ~2–3x faster scraping (higher CAPTCHA risk)
+  getScrapeFastMode: () => process.env.SCRAPE_FAST === '1' || process.env.SCRAPE_FAST === 'true',
+  // Scraping — job queue, resume; IPC progress is counts/phase/source only
   startScrape: (config) => ipcRenderer.invoke('start-scrape', config),
   startEmailScrape: (config) => ipcRenderer.invoke('start-email-scrape', config),
-  stopScrape: () => ipcRenderer.invoke('stop-scrape'),
+  stopScrape: (mode) => ipcRenderer.invoke('stop-scrape', mode),
   onProgress: (callback) => ipcRenderer.on('scrape-progress', (event, data) => callback(data)),
   openScraper: () => ipcRenderer.send('open-scraper'),
+  getRunStatus: () => ipcRenderer.invoke('get-run-status'),
+  resumeRun: () => ipcRenderer.invoke('resume-run'),
+  discardSavedRun: () => ipcRenderer.invoke('discard-saved-run'),
   
   // Contacts CRUD
   loadContacts: () => ipcRenderer.invoke('load-contacts'),
+  clearAllContacts: () => ipcRenderer.invoke('clear-all-contacts'),
   deleteContacts: (ids) => ipcRenderer.invoke('delete-contacts', ids),
   importContacts: (contacts) => ipcRenderer.invoke('import-contacts', contacts),
+  getSearchHistory: () => ipcRenderer.invoke('get-search-history'),
+  loadContactsByRunId: (runId) => ipcRenderer.invoke('load-contacts-by-run-id', runId),
   
   // Email verification
   verifyEmails: (emailData, apiKey) => ipcRenderer.invoke('verify-emails', emailData, apiKey),
+  verifyEmailsSmtp: (emailData) => ipcRenderer.invoke('verify-emails-smtp', emailData),
+  verifyEmailsMx: (emailData) => ipcRenderer.invoke('verify-emails-mx', emailData),
+  verifyScraperResults: (contacts) => ipcRenderer.invoke('verify-scraper-results', contacts),
   updateContactVerification: (contactId, isVerified, status) => 
     ipcRenderer.invoke('update-contact-verification', contactId, isVerified, status),
   onVerificationProgress: (callback) => 
@@ -30,6 +41,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   
   // Data refresh listener
   onRefreshData: (callback) => ipcRenderer.on('refresh-data', () => callback()),
+  onContactsSaveError: (callback) => ipcRenderer.on('contacts-save-error', (event, data) => callback(data)),
 
   // ============================================
   // WEEK 3: EMAIL SENDING SYSTEM

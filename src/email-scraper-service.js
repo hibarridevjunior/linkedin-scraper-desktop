@@ -16,10 +16,83 @@ const { runGoogleMapsScraper } = require('./googlemaps-scraper');
 const { runWebsiteScraper, runBulkWebsiteScraper } = require('./website-scraper');
 const { createClient } = require('@supabase/supabase-js');
 
-const SUPABASE_URL = 'https://cvecdppmqcxgofetrfir.supabase.co';
-const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN2ZWNkcHBtcWN4Z29mZXRyZmlyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc1ODQ3NDYsImV4cCI6MjA4MzE2MDc0Nn0.GjF5fvkdeDo8kjso3RxQTVEroMO6-hideVgPAYWDyvc';
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://cvecdppmqcxgofetrfir.supabase.co';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN2ZWNkcHBtcWN4Z29mZXRyZmlyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc1ODQ3NDYsImV4cCI6MjA4MzE2MDc0Nn0.GjF5fvkdeDo8kjso3RxQTVEroMO6-hideVgPAYWDyvc';
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+/** Max results per source for unified email scrape (bulk up to 2,500). */
+const MAX_RESULTS_PER_SOURCE = 2500;
+
+/**
+ * Build list of jobs for unified email scrape. One job per enabled source.
+ * Main process uses this to build the queue; no parallel Google or LinkedIn.
+ * @param {Object} config - { query, sources: { linkedin, googleSearch, googleMaps, websites }, maxResultsPerSource, industry, keywords }
+ * @returns {Array<{ type: string, config: Object }>} - Jobs for the runner
+ */
+function buildEmailScraperJobs(config) {
+  const {
+    query,
+    sources = {},
+    maxResultsPerSource = 20,
+    industry = null,
+    keywords = null
+  } = config;
+  const maxPer = Math.min(MAX_RESULTS_PER_SOURCE, Math.max(1, maxResultsPerSource || 20));
+  const jobs = [];
+
+  if (sources.linkedin) {
+    jobs.push({
+      type: 'linkedin',
+      config: {
+        searchMode: 'company',
+        companyName: query,
+        companyDomain: (query || '').toLowerCase().replace(/\s+/g, '').replace(/[^a-z0-9]/g, '') + '.com',
+        maxProfiles: maxPer,
+        jobTitles: [],
+        industry,
+        keywords,
+        location: null
+      }
+    });
+  }
+  if (sources.googleSearch) {
+    jobs.push({
+      type: 'google_search',
+      config: {
+        searchQuery: `${(query || '').trim()} email contact`,
+        originalQuery: query,
+        maxResults: maxPer,
+        industry,
+        keywords: keywords || query
+      }
+    });
+  }
+  if (sources.googleMaps) {
+    jobs.push({
+      type: 'google_maps',
+      config: {
+        searchQuery: query,
+        maxResults: maxPer,
+        industry,
+        keywords,
+        enableEnrichment: true
+      }
+    });
+  }
+  if (sources.websites && ((query || '').includes('http') || (query || '').includes('.com') || (query || '').includes('.co.za'))) {
+    jobs.push({
+      type: 'website',
+      config: {
+        websiteUrl: query,
+        industry,
+        keywords,
+        isBulk: (query || '').split(/[,;\n\r]+/).filter(Boolean).length > 1
+      }
+    });
+  }
+  return jobs;
+}
 
 /**
  * Merge contact data from multiple sources
@@ -455,4 +528,4 @@ async function runUnifiedEmailScraper(config, progressCallback, checkCancellatio
   return finalResult;
 }
 
-module.exports = { runUnifiedEmailScraper, mergeContacts };
+module.exports = { buildEmailScraperJobs, runUnifiedEmailScraper, mergeContacts };

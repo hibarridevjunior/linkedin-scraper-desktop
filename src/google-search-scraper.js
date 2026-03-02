@@ -1,22 +1,48 @@
 /**
  * Google Search Email Scraper
- * 
- * Scrapes email addresses from Google Search results
- * Searches for company emails and extracts them from result snippets and pages
+ * One job per run: accepts job config, returns contacts. No Supabase — main/runner handles upserts.
+ * Job boundaries: one browser per job; browser closed after job. Cancellation checks between operations.
+ * IPC progress: only counts/phase sent via progressCallback; no contact arrays or Playwright refs.
  */
 
 const { launchBrowser } = require('./browser-helper');
-const { createClient } = require('@supabase/supabase-js');
-const { extractEmails, filterBusinessEmails, getBestEmail, createContactFromEmail } = require('./email-extractor');
+const { extractEmails, filterBusinessEmails, createContactFromEmail, extractCompanyName, getOgSiteNameFromHtml } = require('./email-extractor');
+const { googleDelay } = require('./cooldown-config');
+// Import sitemap and contact-page helpers from website-scraper
+const { findSitemaps, fetchAllUrlsFromSitemap, fetchUrlsFromHtmlSitemap, getContactPageUrls, getContactLinkUrlsFromPage } = require('./website-scraper');
 
-const SUPABASE_URL = 'https://cvecdppmqcxgofetrfir.supabase.co';
-const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN2ZWNkcHBtcWN4Z29mZXRyZmlyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc1ODQ3NDYsImV4cCI6MjA4MzE2MDc0Nn0.GjF5fvkdeDo8kjso3RxQTVEroMO6-hideVgPAYWDyvc';
+/** Timeout per page visit. Lower when SCRAPE_FAST=1 (faster but may miss slow pages). */
+const VISIT_PAGE_TIMEOUT_MS = process.env.SCRAPE_FAST === '1' || process.env.SCRAPE_FAST === 'true' ? 8000 : 15000;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+/**
+ * Whether a string looks like a company/organization name (not snippet text or a sentence).
+ * Avoids saving "For Sponsorship", "This February, Mining Indaba and 121...", etc. as company.
+ */
+function looksLikeCompanyName(str) {
+  if (!str || typeof str !== 'string') return false;
+  const t = str.trim();
+  if (t.length > 50) return false;
+  const lower = t.toLowerCase();
+  const sentenceLike = /\b(for|this|these|the|and|with|our|your|get|see|learn|read|how|what|when|why)\b/i;
+  if (sentenceLike.test(lower) && t.length > 20) return false;
+  if (/^for\s+/i.test(lower) || /^this\s+/i.test(lower)) return false;
+  if ((t.match(/\s/g) || []).length > 4) return false;
+  return true;
+}
 
-function randomSleep(min = 1000, max = 3000) {
-  const ms = Math.floor(Math.random() * (max - min + 1)) + min;
-  return new Promise(resolve => setTimeout(resolve, ms));
+/**
+ * Derive company name from URL hostname (e.g. pbf.org.za -> Pbf).
+ */
+function companyFromUrl(url) {
+  if (!url) return null;
+  try {
+    const hostname = new URL(url).hostname.replace(/^www\./, '');
+    const domainName = hostname.split('.')[0];
+    if (!domainName || domainName.length < 2) return null;
+    return domainName.charAt(0).toUpperCase() + domainName.slice(1).toLowerCase();
+  } catch (e) {
+    return null;
+  }
 }
 
 /**
@@ -25,6 +51,7 @@ function randomSleep(min = 1000, max = 3000) {
  * @param {Object} limits
  * @param {number} limits.maxResultLinks - max links to scan on page
  * @param {number} limits.maxUniqueResults - max unique result URLs to keep
+ * Phase 1: returns URLs only (resultItems). No snippet email extraction.
  * @returns {{ emailResults: Array<Object>, resultItems: Array<Object> }}
  */
 async function extractEmailsFromSearchResults(page, limits = {}) {
@@ -151,7 +178,7 @@ async function extractEmailsFromSearchResults(page, limits = {}) {
       if (error.message.includes('Execution context was destroyed') || 
           error.message.includes('navigation')) {
         console.log('Page navigated during evaluation, retrying after wait...');
-        await randomSleep(3000, 5000);
+        await googleDelay('afterSearch');
         // Retry once with simpler extraction
         try {
           searchResults = await page.evaluate(({ maxLinks, maxUnique }) => {
@@ -203,196 +230,268 @@ async function extractEmailsFromSearchResults(page, limits = {}) {
       console.log('Page debug info:', pageInfo);
     }
     
-    // Extract emails from snippets
-    for (const result of searchResults) {
-      const snippetText = (result.title + ' ' + result.snippet).toLowerCase();
-      const emails = extractEmails(result.snippet, '');
-      const businessEmails = filterBusinessEmails(emails);
-      
-      for (const email of businessEmails) {
-        results.push({
-          email,
-          context: result.snippet,
-          url: result.url,
-          title: result.title
-        });
-      }
-    }
-    
-    console.log(`Found ${results.length} emails in search result snippets`);
+    // Phase 1: URLs only — no snippet email extraction. Emails come from Phase 2 (visiting contact pages).
+    console.log(`Collected ${searchResults.length} result URLs (emails will be extracted when visiting contact pages)`);
   } catch (error) {
     console.log('Error extracting from search results:', error.message);
   }
-  
-  return { emailResults: results, resultItems: searchResults };
+
+  return { emailResults: [], resultItems: searchResults };
 }
 
 /**
- * Visit a URL and extract emails from the page
+ * Check if a URL is a homepage (just domain or domain/)
+ * @param {string} url - URL to check
+ * @returns {boolean} - True if looks like homepage
+ */
+function isHomepage(url) {
+  try {
+    const u = new URL(url);
+    const path = u.pathname.replace(/\/$/, '');
+    return !path || path === '' || path === '/';
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Extract emails from a website by scraping all pages from its sitemap
+ * @param {Page} page - Playwright page instance
+ * @param {string} websiteUrl - Website homepage URL
+ * @param {string} companyName - Company name for context
+ * @param {string} originalQuery - Original search query
+ * @param {number} maxPages - Maximum pages to scrape from sitemap (default 50)
+ * @returns {Array<Object>} - Array of contact objects
+ */
+async function extractEmailsFromWebsiteWithSitemap(page, websiteUrl, companyName, originalQuery = null, maxPages = 250) {
+  const contacts = [];
+  const baseDomain = new URL(websiteUrl).hostname.replace(/^www\./, '');
+  const sameDomain = (u) => {
+    try {
+      const host = new URL(u).hostname.replace(/^www\./, '');
+      return host === baseDomain;
+    } catch (e) { return false; }
+  };
+
+  try {
+    let allPageUrls = [];
+    const xmlSitemaps = await findSitemaps(websiteUrl);
+    if (xmlSitemaps && xmlSitemaps.length) {
+      for (const sitemapUrl of xmlSitemaps) {
+        try {
+          const pageUrls = await fetchAllUrlsFromSitemap(sitemapUrl);
+          allPageUrls.push(...pageUrls);
+        } catch (e) {
+          console.log(`Error fetching sitemap ${sitemapUrl}: ${e.message}`);
+        }
+      }
+    }
+    if (allPageUrls.length === 0) {
+      const htmlUrls = await fetchUrlsFromHtmlSitemap(websiteUrl);
+      if (htmlUrls.length) allPageUrls = htmlUrls;
+    }
+    if (allPageUrls.length === 0) {
+      allPageUrls = [websiteUrl];
+    }
+    const filtered = [...new Set(allPageUrls)].filter(sameDomain).slice(0, maxPages);
+    const urlsToScrape = [websiteUrl, ...filtered.filter(u => u !== websiteUrl)];
+
+    console.log(`Found sitemap: will scrape ${urlsToScrape.length} pages from ${websiteUrl}`);
+
+    for (const pageUrl of urlsToScrape) {
+      try {
+        await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: VISIT_PAGE_TIMEOUT_MS });
+        await googleDelay('betweenPageVisits');
+        const pageContent = await page.evaluate(() => ({
+          text: document.body.innerText || '',
+          html: document.body.innerHTML || '',
+          title: document.title || '',
+          h1: (document.querySelector('h1') && (document.querySelector('h1').innerText || '').trim()) || ''
+        }));
+        const titlePart = (pageContent.title || '').split('|')[0].split('-')[0].split('—')[0].split('–')[0].trim();
+        const pageDisplayName = (titlePart && titlePart.length < 150) ? titlePart : (pageContent.h1 && pageContent.h1.length < 150 ? pageContent.h1 : '') || companyName || '';
+        const allEmails = extractEmails(pageContent.text, pageContent.html);
+        const businessEmails = filterBusinessEmails(allEmails);
+        for (const email of businessEmails) {
+          const contact = createContactFromEmail(email, pageContent.text, {
+            company: companyName || null,
+            company_website: websiteUrl,
+            source: 'google_search',
+            search_query: originalQuery,
+            pageDisplayName: pageDisplayName || companyName || null
+          });
+          if (contact) contacts.push(contact);
+        }
+      } catch (e) {
+        console.log(`Error scraping ${pageUrl}: ${e.message}`);
+      }
+    }
+  } catch (error) {
+    console.log(`Error extracting from website ${websiteUrl}: ${error.message}`);
+  }
+  return contacts;
+}
+
+/**
+ * Visit a URL and extract emails from the page (or all pages if homepage with sitemap)
  * @param {Page} page - Playwright page instance
  * @param {string} url - URL to visit
  * @param {string} companyName - Company name for context
  * @param {string} originalQuery - Original search query (before "email contact" was added)
  * @returns {Array<Object>} - Array of contact objects
  */
+/**
+ * Phase 2: Visit a result URL — get company name from it, then extract emails only from the Contact us page(s).
+ * If no contact page has emails, fall back to the landing page so we don't miss homepage-only emails.
+ */
 async function extractEmailsFromPage(page, url, companyName, originalQuery = null) {
   const contacts = [];
-  
+  const seenEmails = new Set();
+
   try {
-    await page.goto(url, { waitUntil: 'networkidle', timeout: 20000 });
-    // No extra delay needed
-    
-    // Wait for page to be stable
+    // Load the result URL only to get company name (and fallback if no contact page has emails)
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: VISIT_PAGE_TIMEOUT_MS });
     try {
-      await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
-    } catch (e) {
-      // Ignore timeout
-    }
-    
-    // Get page content with error handling
-    let pageContent = { text: '', html: '', title: '' };
+      await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+    } catch (e) {}
+
+    let pageContent = { text: '', html: '', title: '', h1: '' };
     try {
-      pageContent = await page.evaluate(() => {
-        return {
-          text: document.body.innerText || '',
-          html: document.body.innerHTML || '',
-          title: document.title || ''
-        };
-      });
+      pageContent = await page.evaluate(() => ({
+        text: document.body && (document.body.innerText || ''),
+        html: document.body && (document.body.innerHTML || ''),
+        title: document.title || '',
+        h1: (document.querySelector('h1') && (document.querySelector('h1').innerText || '').trim()) || ''
+      }));
     } catch (error) {
-      if (error.message.includes('Execution context was destroyed') || 
-          error.message.includes('navigation')) {
-        console.log(`Page navigated during content extraction for ${url}, skipping...`);
+      if (error.message.includes('Execution context was destroyed') || error.message.includes('navigation')) {
         return contacts;
       }
       throw error;
     }
-    
-    // Extract all emails
-    const allEmails = extractEmails(pageContent.text, pageContent.html);
-    const businessEmails = filterBusinessEmails(allEmails);
-    
-    // Get company name from page if not provided
-    let company = companyName;
+
+    // Get company name: prefer extractCompanyName from page title/og:site_name/url; fallback to result title then domain
+    let company = extractCompanyName({
+      title: pageContent.title,
+      url,
+      ogSiteName: getOgSiteNameFromHtml(pageContent.html) || null
+    }) || companyName || null;
     if (!company) {
       try {
-        company = await page.evaluate(() => {
-          // Generic page titles to skip
-          const genericTitles = [
-            'contact us', 'contact', 'about', 'about us', 'home', 'welcome',
-            'get in touch', 'reach us', 'email us', 'phone', 'location',
-            'privacy policy', 'terms', 'terms of service', 'careers', 'jobs',
-            'blog', 'news', 'services', 'products', 'portfolio'
-          ];
-          
-          // Try structured data first (most reliable)
-          const ldJson = document.querySelector('script[type="application/ld+json"]');
-          if (ldJson) {
-            try {
-              const data = JSON.parse(ldJson.textContent);
-              if (data.name && !genericTitles.includes(data.name.toLowerCase())) {
-                return data.name;
-              }
-              if (data.organization?.name && !genericTitles.includes(data.organization.name.toLowerCase())) {
-                return data.organization.name;
-              }
-            } catch (e) {}
-          }
-          
-          // Try meta tags
-          const ogSiteName = document.querySelector('meta[property="og:site_name"]');
-          if (ogSiteName?.content && !genericTitles.includes(ogSiteName.content.toLowerCase())) {
-            return ogSiteName.content;
-          }
-          
-          // Try h1 (but filter out generic text)
-          const h1 = document.querySelector('h1')?.innerText?.trim();
-          if (h1 && h1.length < 60 && !genericTitles.includes(h1.toLowerCase())) {
-            return h1;
-          }
-          
-          // Try page title (but filter out generic text)
-          const title = document.title.split('|')[0].split('-')[0].split('—')[0].split('–')[0].trim();
-          if (title && title.length < 60 && !genericTitles.includes(title.toLowerCase())) {
-            return title;
-          }
-          
-          // Extract from URL domain as last resort
-          try {
-            const hostname = new URL(window.location.href).hostname;
-            const domainName = hostname.replace('www.', '').split('.')[0];
-            // Capitalize first letter
-            return domainName.charAt(0).toUpperCase() + domainName.slice(1);
-          } catch (e) {
-            return '';
-          }
-        });
-      } catch (e) {
-        // If evaluation fails, try to extract from URL
-        try {
-          const urlObj = new URL(url);
-          const domainName = urlObj.hostname.replace('www.', '').split('.')[0];
-          company = domainName.charAt(0).toUpperCase() + domainName.slice(1);
-        } catch (e2) {
-          company = '';
-        }
+        const urlObj = new URL(url);
+        company = (urlObj.hostname.replace('www.', '').split('.')[0] || '').charAt(0).toUpperCase() + (urlObj.hostname.replace('www.', '').split('.')[0] || '').slice(1);
+      } catch (e2) {
+        company = '';
       }
     }
-    
-    // Clean up company name - remove generic suffixes
     if (company) {
-      const genericSuffixes = [' - contact us', ' | contact us', ' contact', ' - contact', ' | contact'];
-      genericSuffixes.forEach(suffix => {
-        if (company.toLowerCase().endsWith(suffix.toLowerCase())) {
-          company = company.substring(0, company.length - suffix.length).trim();
-        }
+      [' - contact us', ' | contact us', ' contact', ' - contact', ' | contact'].forEach(suffix => {
+        if (company.toLowerCase().endsWith(suffix.toLowerCase())) company = company.substring(0, company.length - suffix.length).trim();
       });
     }
-    
-    // Create contact objects for each email
-    for (const email of businessEmails) {
-      const contact = createContactFromEmail(email, pageContent.text, {
-        company: company || null,
-        company_website: url,
-        source: 'google_search',
-        search_query: originalQuery // Store original search query (before "email contact" was added)
-      });
-      
-      if (contact) {
-        contacts.push(contact);
+    // When company came from page (not from result title), replace with URL if it doesn't look like a company name. Keep result title when provided.
+    if (company && !looksLikeCompanyName(company) && !companyName) {
+      company = companyFromUrl(url) || company;
+    }
+
+    // ——— Extract emails from Contact us page(s): first try links found on the page, then guessed paths ———
+    let baseOrigin;
+    try {
+      baseOrigin = new URL(url).origin;
+    } catch (e) {
+      baseOrigin = null;
+    }
+    const sameOrigin = (u) => { try { return new URL(u).origin === baseOrigin; } catch (e) { return false; } };
+
+    const tryContactUrl = async (contactUrl) => {
+      if (contactUrl === url) return;
+      try {
+        await page.goto(contactUrl, { waitUntil: 'domcontentloaded', timeout: Math.min(VISIT_PAGE_TIMEOUT_MS, 10000) });
+        await googleDelay('betweenPageVisits');
+        const contactPageContent = await page.evaluate(() => ({
+          text: document.body && (document.body.innerText || ''),
+          html: document.body && (document.body.innerHTML || ''),
+          title: document.title || '',
+          h1: (document.querySelector('h1') && (document.querySelector('h1').innerText || '').trim()) || ''
+        }));
+        const titlePart = (contactPageContent.title || '').split('|')[0].split('-')[0].split('—')[0].split('–')[0].trim();
+        const pageDisplayName = (titlePart && titlePart.length < 150) ? titlePart : (contactPageContent.h1 && contactPageContent.h1.length < 150 ? contactPageContent.h1 : '') || company || '';
+        const contactEmails = extractEmails(contactPageContent.text || '', contactPageContent.html || '');
+        const contactBusiness = filterBusinessEmails(contactEmails);
+        for (const email of contactBusiness) {
+          if (contacts.length >= 2) break; // max 2 contacts per website
+          const lower = email.toLowerCase();
+          if (seenEmails.has(lower)) continue;
+          seenEmails.add(lower);
+          const contact = createContactFromEmail(email, contactPageContent.text || '', {
+            company: company || null,
+            company_website: url,
+            source: 'google_search',
+            search_query: originalQuery,
+            pageDisplayName: pageDisplayName || company || null
+          });
+          if (contact) contacts.push(contact);
+        }
+      } catch (e) {
+        // Contact page failed — try next candidate
+      }
+    };
+
+    if (baseOrigin) {
+      // 1) Contact links found on the current page (we're already on the landing page)
+      const linkUrls = await getContactLinkUrlsFromPage(page, url, 5);
+      for (const contactUrl of linkUrls) {
+        await tryContactUrl(contactUrl);
+      }
+      // 2) Fallback: guessed contact paths
+      const guessedUrls = getContactPageUrls(url).filter(sameOrigin).slice(0, 5);
+      for (const contactUrl of guessedUrls) {
+        await tryContactUrl(contactUrl);
       }
     }
-    
+
+    // Fallback: if no contact page had emails, use the landing page we already loaded
+    if (contacts.length === 0) {
+      const titlePart = (pageContent.title || '').split('|')[0].split('-')[0].split('—')[0].split('–')[0].trim();
+      const pageDisplayName = (titlePart && titlePart.length < 150) ? titlePart : (pageContent.h1 && pageContent.h1.length < 150 ? pageContent.h1 : '') || company || '';
+      const allEmails = extractEmails(pageContent.text, pageContent.html);
+      const businessEmails = filterBusinessEmails(allEmails).slice(0, 2); // max 2 per website
+      for (const email of businessEmails) {
+        const contact = createContactFromEmail(email, pageContent.text, {
+          company: company || null,
+          company_website: url,
+          source: 'google_search',
+          search_query: originalQuery,
+          pageDisplayName: pageDisplayName || company || null
+        });
+        if (contact) contacts.push(contact);
+      }
+    }
   } catch (error) {
     console.log(`Error extracting from ${url}:`, error.message);
   }
-  
-  return contacts;
+
+  return contacts.slice(0, 2); // max 2 contacts per website
 }
 
 /**
- * Run Google Search email scraper
- * @param {string} searchQuery - Search query (e.g., "company name email contact")
- * @param {number} maxResults - Maximum number of results to process
- * @param {string} industry - Industry tag (optional)
- * @param {string} keywords - Keywords tag (optional)
- * @param {Function} progressCallback - Progress callback function
+ * Run Google Search email scraper — one job config; returns contacts; no Supabase.
+ * @param {Object} config - { searchQuery, originalQuery, maxResults, industry, keywords }
+ * @param {Function} progressCallback - Progress callback (counts/phase only; no contact arrays)
+ * @param {Object} options - { checkCancellation }
  * @returns {Array<Object>} - Array of contact objects
  */
-async function runGoogleSearchScraper(searchQuery, maxResults = 20, industry = null, keywords = null, progressCallback, options = {}) {
+async function runGoogleSearchScraper(config, progressCallback, options = {}) {
+  const { searchQuery, originalQuery: configOriginalQuery, maxResults = 20, industry = null, keywords = null } = config || {};
+  const originalQuery = configOriginalQuery != null ? configOriginalQuery : searchQuery;
+  const checkCancellation = options.checkCancellation || (() => false);
   const scrapedContacts = [];
   let browser;
   
-  // Get cancellation check function and original query from options
-  const checkCancellation = options.checkCancellation || (() => false);
-  const originalQuery = options.originalQuery || searchQuery; // Use original query if provided, otherwise use searchQuery
-  
-  // Scale internal limits from the user's target (maxResults)
-  // These are *not* fixed caps like 10/30 anymore; they scale up with the requested target.
-  // Still includes a safety ceiling to avoid infinite/risky runs on Google.
-  const maxUniqueResults = Math.min(300, Math.max(30, maxResults * 5));
-  const maxResultLinks = Math.min(800, Math.max(60, maxResults * 12));
-  const maxUrlsToVisit = Math.min(800, Math.max(30, maxResults * 12));
+  // Scale internal limits from the user's target (maxResults); bulk up to 2,500.
+  const maxUniqueResults = Math.min(3000, Math.max(30, maxResults * 5));
+  const maxResultLinks = Math.min(3000, Math.max(60, maxResults * 12));
+  const maxUrlsToVisit = Math.min(3000, Math.max(30, maxResults * 12));
   
   try {
     progressCallback({ 
@@ -431,7 +530,7 @@ async function runGoogleSearchScraper(searchQuery, maxResults = 20, industry = n
     
     const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
     await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 60000 });
-    await randomSleep(3000, 5000);
+    await googleDelay('afterSearch');
     
     // Wait for results - try multiple selectors
     try {
@@ -439,7 +538,7 @@ async function runGoogleSearchScraper(searchQuery, maxResults = 20, industry = n
     } catch (e) {
       console.log('Waiting for search results timed out, continuing anyway...');
     }
-    await randomSleep(2000, 3000);
+    await googleDelay('afterResults');
     
     // Check if we're on a CAPTCHA page
     let isCaptcha = false;
@@ -472,7 +571,7 @@ async function runGoogleSearchScraper(searchQuery, maxResults = 20, industry = n
       const startTime = Date.now();
       
       while (!captchaSolved && (Date.now() - startTime) < maxWaitTime) {
-        await randomSleep(2000, 3000); // Reduced delay for CAPTCHA check
+        await googleDelay('captchaCheck');
         
         let stillCaptcha = false;
         try {
@@ -501,48 +600,26 @@ async function runGoogleSearchScraper(searchQuery, maxResults = 20, industry = n
       }
     }
     
-    // ========== PHASE 2: EXTRACT EMAILS FROM SEARCH RESULTS ==========
+    // ========== PHASE 2: EXTRACT EMAILS FROM SEARCH RESULTS (WITH PAGINATION) ==========
     progressCallback({ 
-      status: 'Extracting emails from search results...', 
+      status: 'Extracting emails from search results (page 1)...', 
       profilesFound: 0, 
       profilesScraped: 0,
       phase: 'extract'
     });
     
-    // Scroll down to load more results when the user requests many targets
-    if (maxResults > 10) {
-      console.log('Scrolling to load more search results...');
-      try {
-        // Scroll down multiple times to trigger lazy loading
-        const scrollSteps = Math.min(10, Math.max(3, Math.ceil(maxResults / 10)));
-        for (let scroll = 0; scroll < scrollSteps; scroll++) {
-          await page.evaluate(() => {
-            window.scrollTo(0, document.body.scrollHeight);
-          });
-          await randomSleep(1500, 2500);
-        }
-        // Scroll back to top
-        await page.evaluate(() => {
-          window.scrollTo(0, 0);
-        });
-        await randomSleep(1000, 1500);
-      } catch (e) {
-        console.log('Error scrolling:', e.message);
-      }
-    }
+    // Phase 1: Collect URLs only (no snippet emails)
+    let allResultItems = [];
+    let currentPage = 1;
+    // Scale max pages based on target: ~10 results per page; bulk cap 250 pages (2,500 results)
+    const maxPages = Math.min(250, Math.max(1, Math.ceil(maxResults / 10)));
     
-    const { emailResults, resultItems } = await extractEmailsFromSearchResults(page, {
-      maxResultLinks,
-      maxUniqueResults
-    });
-    
-    // Process search result emails
-    for (let i = 0; i < emailResults.length && scrapedContacts.length < maxResults; i++) {
-      // Check for cancellation before each result
+    while (currentPage <= maxPages) {
+      // Check for cancellation before each page
       if (checkCancellation && checkCancellation()) {
         progressCallback({ 
           status: 'Scraping cancelled by user', 
-          profilesFound: emailResults.length, 
+profilesFound: allResultItems.length,
           profilesScraped: scrapedContacts.length,
           cancelled: true,
           phase: 'extract'
@@ -550,69 +627,256 @@ async function runGoogleSearchScraper(searchQuery, maxResults = 20, industry = n
         break;
       }
       
-      const result = emailResults[i];
+      if (currentPage > 1) {
+        progressCallback({
+          status: `Collecting URLs from page ${currentPage}...`,
+          profilesFound: allResultItems.length,
+          profilesScraped: scrapedContacts.length,
+          phase: 'extract'
+        });
+      }
       
-      progressCallback({ 
-        status: `Processing email ${i + 1}/${emailResults.length}...`, 
-        profilesFound: emailResults.length, 
-        profilesScraped: scrapedContacts.length,
-        phase: 'extract'
+      // Scroll down to load more results on current page
+      if (maxResults > 10) {
+        try {
+          const scrollSteps = Math.min(5, Math.max(2, Math.ceil(maxResults / 20)));
+          for (let scroll = 0; scroll < scrollSteps; scroll++) {
+            await page.evaluate(() => {
+              window.scrollTo(0, document.body.scrollHeight);
+            });
+            await googleDelay('scroll');
+          }
+          await page.evaluate(() => {
+            window.scrollTo(0, 0);
+          });
+          await googleDelay('scroll');
+        } catch (e) {
+          console.log('Error scrolling:', e.message);
+        }
+      }
+      
+      // Extract from current page
+      const { emailResults, resultItems } = await extractEmailsFromSearchResults(page, {
+        maxResultLinks,
+        maxUniqueResults
       });
       
-      // Extract better company name from URL if title is generic
-      let companyName = result.title || null;
-      if (companyName) {
-        const genericTitles = ['contact us', 'contact', 'about', 'home', 'welcome'];
-        if (genericTitles.includes(companyName.toLowerCase().trim())) {
-          // Extract from URL instead
-          try {
-            const urlObj = new URL(result.url);
-            const domainName = urlObj.hostname.replace('www.', '').split('.')[0];
-            companyName = domainName.charAt(0).toUpperCase() + domainName.slice(1);
-          } catch (e) {
-            companyName = null;
+      if (resultItems && resultItems.length > 0) {
+        allResultItems = allResultItems.concat(resultItems);
+      }
+      
+      // Stop pagination when we have enough URLs (Phase 2 will visit them and get emails from contact pages)
+      if (allResultItems.length >= maxResults) {
+        console.log(`Collected ${allResultItems.length} URLs, stopping pagination — Phase 2 will visit contact pages`);
+        break;
+      }
+      
+      // Try to click "Next" button to go to next page
+      if (currentPage < maxPages && allResultItems.length < maxResults) {
+        const hasNextPage = await page.evaluate(() => {
+          // Try multiple selectors for Google's "Next" button
+          const nextSelectors = [
+            'a[aria-label="Next"]',
+            'a#pnnext',
+            'a[aria-label*="Next"]',
+            'td[style*="text-align"] a[aria-label*="Next"]',
+            'a[href*="start="]' // Google pagination URL pattern
+          ];
+          
+          for (const selector of nextSelectors) {
+            try {
+              const nextBtn = document.querySelector(selector);
+              if (nextBtn) {
+                const href = nextBtn.href || nextBtn.getAttribute('href') || '';
+                if (href && !href.includes('javascript:') && (href.includes('start=') || href.includes('&start='))) {
+                  return true;
+                }
+              }
+            } catch (e) {}
           }
+          
+          // Check pagination table for Next link
+          const paginationTable = document.querySelector('table[role="presentation"]');
+          if (paginationTable) {
+            const nextLink = paginationTable.querySelector('a#pnnext, a[aria-label*="Next"]');
+            if (nextLink && nextLink.href && !nextLink.href.includes('javascript:')) {
+              return true;
+            }
+          }
+          
+          // Check for pagination numbers - if we see page numbers, there might be a next page
+          const pageNumbers = document.querySelectorAll('a[aria-label*="Page"], td a[href*="start="]');
+          if (pageNumbers.length > 0) {
+            // Check if there's a link with a higher start parameter
+            let maxStart = 0;
+            pageNumbers.forEach(link => {
+              const href = link.href || '';
+              const match = href.match(/[?&]start=(\d+)/);
+              if (match) {
+                const start = parseInt(match[1], 10);
+                if (start > maxStart) maxStart = start;
+              }
+            });
+            // If we found links with start parameters, there might be more pages
+            return maxStart > 0;
+          }
+          
+          return false;
+        });
+        
+        if (hasNextPage) {
+          try {
+            const clicked = await page.evaluate(() => {
+              // Try clicking the Next button - priority order
+              const nextSelectors = [
+                'a#pnnext', // Most reliable Google Next button ID
+                'a[aria-label="Next"]',
+                'a[aria-label*="Next"]',
+                'td[style*="text-align"] a[aria-label*="Next"]'
+              ];
+              
+              for (const selector of nextSelectors) {
+                try {
+                  const nextBtn = document.querySelector(selector);
+                  if (nextBtn) {
+                    const href = nextBtn.href || nextBtn.getAttribute('href') || '';
+                    if (href && !href.includes('javascript:') && (href.includes('start=') || href.includes('&start='))) {
+                      nextBtn.click();
+                      return true;
+                    }
+                  }
+                } catch (e) {}
+              }
+              
+              // Fallback: find link with highest start= parameter (next page)
+              const links = Array.from(document.querySelectorAll('a[href*="start="]'));
+              let nextLink = null;
+              let maxStart = -1;
+              
+              for (const link of links) {
+                const href = link.href || link.getAttribute('href') || '';
+                const match = href.match(/[?&]start=(\d+)/);
+                if (match) {
+                  const start = parseInt(match[1], 10);
+                  if (start > maxStart) {
+                    maxStart = start;
+                    nextLink = link;
+                  }
+                }
+              }
+              
+              if (nextLink && maxStart > 0) {
+                nextLink.click();
+                return true;
+              }
+              
+              return false;
+            });
+            
+            if (clicked) {
+              // Wait for page to load and search results to appear
+              try {
+                await page.waitForSelector('div[data-sokoban-container], div.g, #main, #search', { timeout: 15000 });
+              } catch (e) {
+                console.log('Waiting for search results timed out, continuing...');
+              }
+              await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+              await googleDelay('afterSearch');
+              
+              // Verify we're on a new page (not CAPTCHA, not same page)
+              const pageCheck = await page.evaluate(() => {
+                const bodyText = document.body.innerText.toLowerCase();
+                const isCaptcha = bodyText.includes('captcha') || 
+                                  bodyText.includes('unusual traffic') ||
+                                  document.querySelector('iframe[src*="recaptcha"]') !== null;
+                
+                // Check if we have search results (verify we navigated)
+                const hasResults = !!(
+                  document.querySelector('div[data-sokoban-container]') ||
+                  document.querySelector('div.g') ||
+                  document.querySelector('#main')
+                );
+                
+                return { isCaptcha, hasResults };
+              });
+              
+              if (pageCheck.isCaptcha) {
+                console.log('CAPTCHA detected on next page — waiting for you to solve it...');
+                progressCallback({
+                  status: '⚠️ CAPTCHA on next page. Solve it in the browser, then scraping will continue.',
+                  profilesFound: allResultItems.length,
+                  profilesScraped: scrapedContacts.length,
+                  phase: 'captcha'
+                });
+                let captchaSolved = false;
+                const maxWait = 120000;
+                const start = Date.now();
+                while (!captchaSolved && (Date.now() - start) < maxWait) {
+                  await googleDelay('captchaCheck');
+                  const still = await page.evaluate(() => {
+                    const t = document.body.innerText.toLowerCase();
+                    return t.includes('captcha') || t.includes('unusual traffic') || !!document.querySelector('iframe[src*="recaptcha"]');
+                  }).catch(() => true);
+                  if (!still) {
+                    captchaSolved = true;
+                    console.log('CAPTCHA solved, continuing pagination');
+                    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+                  }
+                }
+                if (!captchaSolved) {
+                  console.log('CAPTCHA not solved in time, stopping pagination');
+                  break;
+                }
+                currentPage++;
+                await googleDelay('afterResults');
+                continue;
+              }
+              
+              if (!pageCheck.hasResults) {
+                console.log('No search results found on new page, stopping pagination');
+                break;
+              }
+              
+              currentPage++;
+              await googleDelay('afterResults');
+            } else {
+              console.log('No next page button found, stopping pagination');
+              break;
+            }
+          } catch (error) {
+            console.log('Error clicking next page:', error.message);
+            break;
+          }
+        } else {
+          console.log('No more pages available, stopping pagination');
+          break;
         }
       } else {
-        // Extract from URL if no title
-        try {
-          const urlObj = new URL(result.url);
-          const domainName = urlObj.hostname.replace('www.', '').split('.')[0];
-          companyName = domainName.charAt(0).toUpperCase() + domainName.slice(1);
-        } catch (e) {
-          companyName = null;
-        }
+        break; // Reached max pages
       }
-      
-      const contact = createContactFromEmail(result.email, result.context, {
-        company: companyName,
-        company_website: result.url,
-        source: 'google_search',
-        industry,
-        keywords,
-        search_query: originalQuery // Store original search query
-      });
-      
-      if (contact) {
-        scrapedContacts.push(contact);
-      }
-      
-      await randomSleep(400, 700); // Reduced delay between results
     }
     
-    // ========== PHASE 3: VISIT TOP RESULTS FOR MORE EMAILS ==========
-    // Always visit pages to extract emails (snippets rarely have emails)
-    progressCallback({ 
-      status: 'Visiting top search results for more emails...', 
-      profilesFound: (resultItems && resultItems.length) ? resultItems.length : (emailResults.length || 10), 
+    console.log(`Phase 1 complete: Collected ${allResultItems.length} URLs from ${currentPage} page(s). Phase 2: visiting contact pages for emails.`);
+
+    // ========== PHASE 2: VISIT URLS → FIND CONTACT PAGE → EXTRACT EMAILS ==========
+    progressCallback({
+      status: 'Visiting URLs to find contact pages and extract emails...',
+      profilesFound: (allResultItems && allResultItems.length) ? allResultItems.length : 0,
       profilesScraped: scrapedContacts.length,
       phase: 'visit'
     });
     
-    // Get URLs from search results, or extract URLs directly from page if extraction failed
+    // Get URLs and preserve result title (underlined "company name" in search results) per URL
     let uniqueUrls = [];
-    if (resultItems && resultItems.length > 0) {
-      uniqueUrls = [...new Set(resultItems.map(r => r.url))].slice(0, maxUrlsToVisit);
+    const urlToTitle = new Map();
+    if (allResultItems && allResultItems.length > 0) {
+      for (const r of allResultItems) {
+        if (r.url && !urlToTitle.has(r.url)) {
+          urlToTitle.set(r.url, (r.title && r.title.trim()) || '');
+          uniqueUrls.push(r.url);
+        }
+      }
+      uniqueUrls = uniqueUrls.slice(0, maxUrlsToVisit);
     } else {
       console.log('Could not extract structured results; extracting URLs directly from page...');
       try {
@@ -690,7 +954,9 @@ async function runGoogleSearchScraper(searchQuery, maxResults = 20, industry = n
         });
         
         try {
-          const pageContacts = await extractEmailsFromPage(page, url, null, originalQuery);
+          // Company = search result title (the underlined link text, e.g. "SOLA Group"). Name = page <title> or <h1> only (no person name).
+          const resultTitle = urlToTitle.get(url) || null;
+          const pageContacts = await extractEmailsFromPage(page, url, resultTitle, originalQuery);
           
           // Add industry and keywords to contacts
           pageContacts.forEach(contact => {
@@ -714,56 +980,25 @@ async function runGoogleSearchScraper(searchQuery, maxResults = 20, industry = n
           console.log(`Error visiting ${url}:`, error.message);
         }
         
-        await randomSleep(800, 1500); // Reduced delay between page visits
+        await googleDelay('betweenPageVisits');
       }
     } else {
       console.log('No URLs found to visit or already reached max results');
     }
     
-    // ========== PHASE 4: SAVE TO DATABASE ==========
-    if (scrapedContacts.length > 0) {
-      progressCallback({ 
-        status: `Saving ${scrapedContacts.length} contacts to database...`, 
-        profilesFound: scrapedContacts.length, 
-        profilesScraped: scrapedContacts.length,
-        phase: 'save'
-      });
-      
-      // Remove duplicates by email
-      const uniqueContacts = [...new Map(scrapedContacts.map(c => [c.email, c])).values()];
-      
-      // Separate contacts with and without email (all should have email, but just in case)
-      const withEmail = uniqueContacts.filter(c => c.email);
-      
-      if (withEmail.length > 0) {
-        const { error } = await supabase
-          .from('contacts')
-          .upsert(withEmail, { onConflict: 'email', ignoreDuplicates: false });
-        
-        if (error) {
-          console.error('Supabase save error:', error);
-        } else {
-          console.log(`Successfully saved ${withEmail.length} contacts from Google Search`);
-        }
-      }
-    }
-    
+    // Return contacts; main/runner handles Supabase upsert. No contact arrays over IPC.
+    const uniqueContacts = [...new Map(scrapedContacts.map(c => [c.email, c])).values()];
     progressCallback({ 
-      status: `Complete! ${scrapedContacts.length} contacts found.`, 
-      profilesFound: scrapedContacts.length, 
-      profilesScraped: scrapedContacts.length,
+      status: `Complete! ${uniqueContacts.length} contacts found.`, 
+      profilesFound: uniqueContacts.length, 
+      profilesScraped: uniqueContacts.length,
       phase: 'complete',
       completed: true,
-      stats: {
-        total: scrapedContacts.length,
-        withEmail: scrapedContacts.filter(c => c.email).length
-      }
+      stats: { total: uniqueContacts.length, withEmail: uniqueContacts.filter(c => c.email).length }
     });
-    
-    await randomSleep(500, 1000); // Reduced final delay
+    await googleDelay('final');
     await browser.close();
-    
-    return scrapedContacts;
+    return uniqueContacts;
     
   } catch (error) {
     progressCallback({ 
